@@ -46,10 +46,38 @@ Pick the tide marker style in Plugin Config. All styles keep blue = rising / red
 
 To add a style, add it to `TIDE_STYLES` in `plugin/icon-styles.js` and a draw function in `tools/generate-symbols.js`, then run `node tools/generate-symbols.js` (it cross-checks the drawings against the catalogue and fails on a mismatch).
 
+## Freeboard-SK 3.0.1: the note-label patch
+
+**Stock Freeboard-SK 3.0.1 never draws note labels at all.** It's an upstream
+regression: the `<fb-notes>` element in `fb-map.component.html` is missing the
+`[mapZoom]` / `[labelMinZoom]` bindings that every other resource layer has, and
+`updateLabels()` is driven only by those inputs. Without them the marker text
+("4.3ft▲ Bald Head") can never appear, whatever `mapLabel` is set to.
+
+Until that is fixed upstream, patch the installed bundle:
+
+```sh
+python3 tools/patch-freeboard-note-labels.py            # apply
+python3 tools/patch-freeboard-note-labels.py --revert   # undo
+```
+
+Then reload Freeboard-SK. The script is idempotent, keeps a `.pre-tide-labels`
+backup next to the chunk it edits, and only labels notes carrying
+`properties.plugin === "signalk-tide-stations"` — other plugins' notes are
+untouched.
+
+⚠ **Re-run it after every Freeboard-SK update.** An update restores the stock
+bundle (and changes the compiled chunk name), silently removing your labels.
+
+The proper fix is a two-line upstream PR adding the missing bindings, which
+would retire this script entirely.
+
 ## Requirements
 
 - Signal K server ≥ 2.x (resource provider API, v2 resources).
 - Freeboard-SK ≥ 2.24 (custom symbol support); ≥ 3.0 for the plotter-extension panel.
+- Freeboard-SK 3.0.1 additionally needs the note-label patch above for marker
+  labels to render.
 
 ## Notes
 
