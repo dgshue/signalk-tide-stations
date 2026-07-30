@@ -117,11 +117,16 @@ module.exports = function (app) {
         options || {}
       )
       running = true
+      let tidesOk = true
       try {
         await tides.init() // loads neaps through its ESM entry
       } catch (err) {
+        tidesOk = false
         app.setPluginError(`tide engine failed to load: ${err.message}`)
         app.error(err.message)
+      }
+      if (currents) {
+        currents.close() // stale instance from a previous start must not write
       }
       currents = new Currents({
         dataDir: app.getDataDirPath(),
@@ -137,11 +142,16 @@ module.exports = function (app) {
         // query can already resolve nearby current stations.
         currents.ensureMeta()
       }
-      app.setPluginStatus('Started')
+      if (tidesOk) {
+        app.setPluginStatus('Started')
+      }
     },
 
     stop() {
       running = false
+      if (currents) {
+        currents.close()
+      }
       // Resource providers are unregistered by the server on plugin stop;
       // the mounted HTTP routes stay (Express cannot unmount) but answer
       // 503 via the `running` guard.
@@ -193,10 +203,14 @@ module.exports = function (app) {
     )
     const missing = stations.filter((s) => !currents.pred.has(s.id))
     if (missing.length > 0) {
+      let timer
       await Promise.race([
         Promise.allSettled(missing.map((s) => currents.fetchPred(s.id))),
-        new Promise((r) => setTimeout(r, budgetMs))
+        new Promise((r) => {
+          timer = setTimeout(r, budgetMs)
+        })
       ])
+      clearTimeout(timer)
     }
     const out = []
     for (const s of stations) {
@@ -246,15 +260,36 @@ module.exports = function (app) {
     if (!area) return {} // Freeboard probes without a viewport -> no-op
     const notes = {}
     for (const { station, state } of tideSummaries(area.pos, area.km)) {
-      const [id, note] = buildTideNote(station, state, noteOpts())
-      notes[id] = note
+      try {
+        const [id, note] = buildTideNote(station, state, noteOpts())
+        notes[id] = note
+      } catch (err) {
+        debug(`tide note build failed for ${station.id}: ${err.message}`)
+      }
     }
-    for (const { station, state } of await currentSummaries(
-      area.pos,
-      area.km
-    )) {
-      const [id, note] = buildCurrentNote(station, state, noteOpts())
-      notes[id] = note
+    // The currents half must never take the offline tide markers down with
+    // it: cap its total time (a first offline catalogue attempt can hang on
+    // its network timeout) and swallow its failures per station.
+    let curList = []
+    try {
+      let timer
+      curList = await Promise.race([
+        currentSummaries(area.pos, area.km),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve([]), 6000)
+        })
+      ])
+      clearTimeout(timer)
+    } catch (err) {
+      debug(`current summaries failed: ${err.message}`)
+    }
+    for (const { station, state } of curList) {
+      try {
+        const [id, note] = buildCurrentNote(station, state, noteOpts())
+        notes[id] = note
+      } catch (err) {
+        debug(`current note build failed for ${station.id}: ${err.message}`)
+      }
     }
     app.setPluginStatus(
       `${Object.keys(notes).length} stations in last chart query`
@@ -361,6 +396,9 @@ module.exports = function (app) {
         description: 'signalk-tide-stations chart marker',
         mediaType: 'image/svg+xml',
         url: `${ASSET_BASE}/symbols/${d.id}.svg`,
+        // Deliberately NOT role "note": roles only govern which pickers
+        // offer a symbol (rendering is unaffected), and 20 station-state
+        // glyphs would clutter the user's note icon picker.
         roles: ['map-marker'],
         scale: d.scale,
         anchor: d.anchor,
@@ -624,6 +662,12 @@ module.exports = function (app) {
       `${ASSET_BASE}/graph/current/:id.svg`,
       guard(async (req, res) => {
         const stationId = req.params.id
+        // Cold cache (fresh install, tap before any chart query): resolve
+        // the station and fetch predictions rather than caching "no data".
+        await currents.ensureMeta()
+        if (currents.stationById(stationId) && !currents.pred.has(stationId)) {
+          await currents.fetchPred(stationId)
+        }
         const now = new Date()
         const start = new Date(now.getTime() - 6 * 3600 * 1000)
         const end = new Date(now.getTime() + 18 * 3600 * 1000)

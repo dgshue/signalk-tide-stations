@@ -22,7 +22,7 @@ Re-run after any Freeboard-SK update (chunk names change).
 """
 import glob
 import os
-import re
+
 import shutil
 import sys
 

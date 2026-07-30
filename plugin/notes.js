@@ -117,8 +117,11 @@ function buildTideNote(station, state, { units, assetBase, pluginId }) {
  * @param state { speed, dir, phase, next } from Currents.stateAt()
  */
 function buildCurrentNote(station, state, { units, assetBase, pluginId }) {
-  const slack = state.phase === 'slack' || state.dir == null
-  const icon = slack ? 'current-slack' : sectorIcon(state.dir)
+  const slack = state.phase === 'slack'
+  const dirKnown = state.dir != null
+  // A running current with an unknown direction must never read as slack:
+  // keep the speed in the label and fall back to the non-directional icon.
+  const icon = slack || !dirKnown ? 'current-slack' : sectorIcon(state.dir)
   const label = slack
     ? `slack ${truncate(station.name)}`
     : `${state.speed.toFixed(1)}kn ${truncate(station.name)}`

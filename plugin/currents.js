@@ -51,6 +51,10 @@ class Currents {
     this.error = error || (() => {})
     this.meta = null // [{id,name,lat,lng,bin,depth,type}] deduped by id
     this.metaAt = 0
+    this.metaInflight = null
+    this.metaFailedAt = 0
+    this.closed = false // set by close(); a stale instance must not write
+    this.saveTimer = null
     this.pred = new Map() // stationId -> { fetchedAt, begin, end, events }
     this.failedAt = new Map() // stationId -> last failure ms
     this.inflight = new Map() // stationId -> Promise
@@ -74,39 +78,97 @@ class Currents {
     } catch {
       /* no cache yet */
     }
+    let p = null
     try {
-      const p = JSON.parse(fs.readFileSync(this.file('currents-pred.json')))
-      for (const [id, v] of Object.entries(p)) {
-        v.events.forEach((e) => (e.time = new Date(e.time)))
-        this.pred.set(id, v)
-      }
+      p = JSON.parse(fs.readFileSync(this.file('currents-pred.json')))
     } catch {
       /* no cache yet */
     }
+    if (p && typeof p === 'object') {
+      // Validate per entry so one corrupt record cannot discard the rest.
+      for (const [id, v] of Object.entries(p)) {
+        try {
+          if (!Array.isArray(v.events) || typeof v.end !== 'string') continue
+          v.events.forEach((e) => (e.time = new Date(e.time)))
+          this.pred.set(id, v)
+        } catch {
+          /* skip bad entry */
+        }
+      }
+    }
+  }
+
+  /** Stop a stale instance (plugin restart): no more writes or new fetches. */
+  close() {
+    this.closed = true
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    // release any queued fetch waiters so their promises settle
+    while (this.queue.length) this.queue.shift()()
+  }
+
+  atomicWrite(name, data) {
+    const tmp = this.file(name + '.tmp')
+    fs.writeFileSync(tmp, data)
+    fs.renameSync(tmp, this.file(name))
   }
 
   saveMeta() {
-    fs.writeFileSync(
-      this.file('currents-meta.json'),
+    if (this.closed) return
+    this.atomicWrite(
+      'currents-meta.json',
       JSON.stringify({ fetchedAt: this.metaAt, stations: this.meta })
     )
   }
 
+  /** Debounced, pruned, atomic persist of the prediction cache. */
   savePred() {
-    const out = {}
-    for (const [id, v] of this.pred.entries()) {
-      out[id] = v
-    }
-    fs.writeFileSync(this.file('currents-pred.json'), JSON.stringify(out))
+    if (this.closed || this.saveTimer) return
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null
+      if (this.closed) return
+      // prune: drop windows that no longer cover yesterday, cap total size
+      const cutoff = dateStamp(new Date(Date.now() - 24 * 3600 * 1000))
+      for (const [id, v] of this.pred.entries()) {
+        if (!v.end || v.end < cutoff) this.pred.delete(id)
+      }
+      while (this.pred.size > 200) {
+        this.pred.delete(this.pred.keys().next().value) // oldest insertion
+      }
+      const out = {}
+      for (const [id, v] of this.pred.entries()) out[id] = v
+      try {
+        this.atomicWrite('currents-pred.json', JSON.stringify(out))
+      } catch (err) {
+        this.debug(`pred cache write failed: ${err.message}`)
+      }
+    }, 5000)
+    // Allow the plugin to stop cleanly without a pending timer holding node
+    if (this.saveTimer.unref) this.saveTimer.unref()
   }
 
   // ---------- station catalogue ----------
 
-  /** Ensure the station catalogue is loaded (fetches when stale). */
+  /** Ensure the station catalogue is loaded (fetches when stale).
+   * In-flight-deduped and failure-backed-off: chart queries arrive on every
+   * pan/zoom, and an offline boat must not stack 30s catalogue fetches
+   * (a stale-but-present cache keeps being served meanwhile). */
   async ensureMeta() {
     if (this.meta && Date.now() - this.metaAt < META_TTL_MS) {
       return this.meta
     }
+    if (Date.now() - this.metaFailedAt < FETCH_FAIL_BACKOFF_MS) {
+      return this.meta // stale or null; retry later
+    }
+    if (this.metaInflight) {
+      return this.metaInflight
+    }
+    this.metaInflight = this.fetchMeta().finally(() => {
+      this.metaInflight = null
+    })
+    return this.metaInflight
+  }
+
+  async fetchMeta() {
     try {
       this.debug('fetching NOAA current station catalogue')
       const res = await fetch(MDAPI, { signal: AbortSignal.timeout(30000) })
@@ -138,6 +200,7 @@ class Currents {
       this.debug(`current catalogue: ${this.meta.length} stations`)
     } catch (err) {
       // Keep whatever cache we have; currents just stay unavailable offline.
+      this.metaFailedAt = Date.now()
       this.error(`NOAA current catalogue fetch failed: ${err.message}`)
     }
     return this.meta
@@ -169,13 +232,15 @@ class Currents {
   events(stationId) {
     const hit = this.pred.get(stationId)
     // hit.end is a NOAA YYYYMMDD stamp; parse it explicitly (Date() cannot).
-    const endMs = hit
-      ? Date.UTC(
-          Number(hit.end.slice(0, 4)),
-          Number(hit.end.slice(4, 6)) - 1,
-          Number(hit.end.slice(6, 8))
-        )
-      : 0
+    // A malformed/missing stamp reads as stale, never as a throw.
+    const endMs =
+      hit && typeof hit.end === 'string' && hit.end.length === 8
+        ? Date.UTC(
+            Number(hit.end.slice(0, 4)),
+            Number(hit.end.slice(4, 6)) - 1,
+            Number(hit.end.slice(6, 8))
+          )
+        : 0
     const fresh = hit && endMs - Date.now() > PRED_MIN_LEAD_MS
     if (!fresh) {
       this.fetchPred(stationId) // fire & forget; dedupes/backoffs internally
@@ -234,6 +299,9 @@ class Currents {
 
   /** Await the prediction fetch (used by API/list paths with a timeout). */
   fetchPred(stationId) {
+    if (this.closed) {
+      return Promise.resolve(null)
+    }
     if (this.inflight.has(stationId)) {
       return this.inflight.get(stationId)
     }
@@ -261,7 +329,13 @@ class Currents {
         const body = await res.json()
         const rows = body.current_predictions && body.current_predictions.cp
         if (!Array.isArray(rows) || rows.length === 0) {
-          throw new Error('no prediction rows')
+          // A clean "no data for this station" is a cacheable answer, not a
+          // failure: remember it so the station is not re-fetched (and the
+          // chart query does not pay its warm-up budget) every pass.
+          const empty = { fetchedAt: Date.now(), begin, end, events: [] }
+          this.pred.set(stationId, empty)
+          this.savePred()
+          return []
         }
         const events = rows.map((r) => ({
           // NOAA returns "YYYY-MM-DD HH:mm" in the requested zone (gmt)
@@ -307,7 +381,7 @@ class Currents {
    * Interpolated state at `time`: { speed (kn, >=0), dir (degT), phase }.
    * phase: 'flood' | 'ebb' | 'slack'. Returns null without cached data.
    */
-  stateAt(stationId, time = new Date()) {
+  stateAt(stationId, time = new Date(), withNext = true) {
     const events = this.events(stationId)
     if (!events || events.length === 0) return null
     const t = time.getTime()
@@ -333,9 +407,12 @@ class Currents {
       speed,
       dir: Number.isFinite(dir) ? dir : null,
       phase,
-      next: this.eventsTable(stationId)
-        .filter((e) => e.time.getTime() > t)
-        .slice(0, 6)
+      // eventsTable is a full derivation pass; series() skips it per-step
+      next: withNext
+        ? this.eventsTable(stationId)
+            .filter((e) => e.time.getTime() > t)
+            .slice(0, 6)
+        : []
     }
   }
 
@@ -343,7 +420,7 @@ class Currents {
   series(stationId, start, end) {
     const out = []
     for (let t = start.getTime(); t < end.getTime(); t += 10 * 60 * 1000) {
-      const s = this.stateAt(stationId, new Date(t))
+      const s = this.stateAt(stationId, new Date(t), false)
       if (!s) continue
       out.push({
         time: new Date(t),

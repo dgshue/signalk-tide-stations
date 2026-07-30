@@ -57,7 +57,34 @@ function stationsNearPos(pos, maxKm, max) {
     latitude: pos.latitude,
     longitude: pos.longitude,
     maxResults: max
-  }).filter((s) => typeof s.distance !== 'number' || s.distance <= maxKm)
+  })
+    .map((s) => {
+      // Fail closed on the radius check: compute the distance ourselves
+      // when neaps does not report one, rather than letting a far station
+      // through (and showing "0.0 nm" for it in the panel).
+      if (typeof s.distance !== 'number') {
+        s.distance = haversineKm(
+          pos.latitude,
+          pos.longitude,
+          s.latitude,
+          s.longitude
+        )
+      }
+      return s
+    })
+    .filter((s) => s.distance <= maxKm)
+}
+
+/** Great-circle distance in km (haversine). */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371
+  const toRad = (x) => (x * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
 }
 
 /** Cached extremes (highs/lows) around now for a station. */
@@ -73,6 +100,11 @@ function extremesFor(stationId) {
     end: new Date(now + WINDOW_FWD_MS)
   }).extremes
   extremesCache.set(stationId, { at: now, extremes })
+  // Bound the cache over a months-long cruise: Maps iterate in insertion
+  // order, so evicting the first key is oldest-inserted.
+  while (extremesCache.size > 300) {
+    extremesCache.delete(extremesCache.keys().next().value)
+  }
   return extremes
 }
 

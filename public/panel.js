@@ -14,6 +14,8 @@ const DAY_MS = 24 * 3600 * 1000
 
 const $ = (id) => document.getElementById(id)
 
+let loadForecastToken = 0
+
 const state = {
   client: null, // bus client or null outside a host
   cfg: { units: 'ft', showCurrents: true },
@@ -64,13 +66,17 @@ function stationKey(s) {
   return `${s.kind}:${s.id}`
 }
 function dayBounds(offset) {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  const start = new Date(d.getTime() + offset * DAY_MS)
-  return { start, end: new Date(start.getTime() + DAY_MS) }
+  // Calendar-day paging (setDate, not +24h) so DST transitions keep the
+  // window aligned with local midnight and the day label truthful.
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  start.setDate(start.getDate() + offset)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return { start, end }
 }
 async function getJSON(url) {
-  const res = await fetch(url)
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
@@ -272,25 +278,36 @@ function updateFavBtn() {
 async function loadForecast() {
   const s = state.sel
   if (!s) return
+  // Stale-response guard: back/away or rapid day-paging while a slow fetch
+  // is in flight must not render the old response (or crash on a null sel).
+  const token = ++loadForecastToken
   const { start, end } = dayBounds(state.dayOffset)
   $('day-label').textContent =
     state.dayOffset === 0 ? `Today · ${fmtDay(start)}` : fmtDay(start)
   $('scrub-readout').textContent = '…'
+  let forecast = null
   try {
     if (s.kind === 'tide') {
       const [src, sid] = s.id.split('/')
-      state.forecast = await getJSON(
-        `${BASE}/api/tide/${src}/${sid}?start=${start.toISOString()}&end=${end.toISOString()}`
+      forecast = await getJSON(
+        `${BASE}/api/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}?start=${start.toISOString()}&end=${end.toISOString()}`
       )
     } else {
-      state.forecast = await getJSON(
+      forecast = await getJSON(
         `${BASE}/api/current/${encodeURIComponent(s.id)}?start=${start.toISOString()}&end=${end.toISOString()}`
       )
     }
   } catch (err) {
-    state.forecast = null
-    $('scrub-readout').textContent = `Load failed: ${err.message}`
+    if (token === loadForecastToken && state.sel === s) {
+      state.forecast = null
+      $('scrub-readout').textContent = `Load failed: ${err.message}`
+    }
+    return
   }
+  if (token !== loadForecastToken || state.sel !== s) {
+    return // superseded by a newer selection/day
+  }
+  state.forecast = forecast
   // default the scrub position to "now" when today is shown
   state.scrubIdx = null
   renderForecast()
@@ -342,7 +359,8 @@ function renderStateBadge() {
       ? 'No prediction data'
       : n.phase === 'slack'
         ? '◦ Slack water'
-        : `${n.phase === 'flood' ? 'Flooding' : 'Ebbing'} · ${n.speed.toFixed(1)} kn → ${Math.round(n.dir)}°T`
+        : `${n.phase === 'flood' ? 'Flooding' : 'Ebbing'} · ${n.speed.toFixed(1)} kn` +
+          (n.dir != null ? ` → ${Math.round(n.dir)}°T` : '')
   }
 }
 
@@ -495,10 +513,8 @@ function renderDetailsTable() {
               ? 'Max Flood'
               : 'Max Ebb'
         const v = e.type === 'slack' ? '—' : `${Math.abs(e.v).toFixed(1)} kn`
-        const dir =
-          e.type === 'slack'
-            ? ''
-            : `${Math.round(e.type === 'flood' ? e.floodDir : e.ebbDir)}°T`
+        const d = e.type === 'flood' ? e.floodDir : e.ebbDir
+        const dir = e.type === 'slack' || d == null ? '' : `${Math.round(d)}°T`
         return `<tr><td>${what}</td><td>${fmtTime(e.time)}</td><td>${v}</td><td>${dir}</td></tr>`
       })
       .join('')
@@ -618,6 +634,19 @@ async function main() {
   if (!state.client) {
     $('layer-btn').style.display = 'none'
     $('goto-btn').style.display = 'none'
+  } else {
+    // The user can clear our display filter from the host's own chip; track
+    // it so the toggle button never inverts relative to reality.
+    try {
+      await state.client.subscribe(['filters.changed'], (ev) => {
+        if (ev && ev.type === 'notes') {
+          state.layerHidden = !!ev.active
+          $('layer-btn').classList.toggle('off', state.layerHidden)
+        }
+      })
+    } catch {
+      /* host without resources.filter */
+    }
   }
   try {
     const cfg = await getJSON(`${BASE}/api/config`)
