@@ -46,18 +46,25 @@ function truncate(name, n = 18) {
   return name.length > n ? name.slice(0, n - 1) + '…' : name
 }
 
+/** Station names reach the popup as HTML, and they come from NOAA. */
+function esc(s) {
+  return String(s).replace(
+    /[<>&"]/g,
+    (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]
+  )
+}
+
 /** valid `mapLabel` config values, in the order the config UI lists them */
 const MAP_LABEL_MODES = ['value-name', 'value', 'name', 'none']
 
 /**
- * Text drawn on the chart next to the icon.
+ * Text drawn on the chart next to the icon — the note `name`.
  *
- * The note `name` always carries the full "<value> <station>" string, because
- * Freeboard uses it as the popup heading and the panel list keys off it. What
- * gets *drawn* is published separately as properties.mapLabel and the patched
- * notes layer reads that. Keeping the two apart means the user can strip the
- * station name (or the label entirely) off a crowded chart without blanking
- * the popup heading too.
+ * Freeboard draws a note's `name` and nothing else, so the label has to be the
+ * name itself; a separate property is only honoured by a patched build. `name`
+ * is also the popup heading, which is why every popup description opens with
+ * the station name in full: shortening the chart label, or turning it off on a
+ * crowded chart, then costs nothing on tap.
  *
  * @param value formatted reading, e.g. "4.3ft▼" or "1.0kn" or "slack"
  * @param stationName full station name (truncated here when it is used)
@@ -118,8 +125,7 @@ function buildTideNote(
   const arrow =
     state.state === 'rising' ? '▲' : state.state === 'falling' ? '▼' : '·'
   const value = `${fmtHeight(state.height, units).replace(' ', '')}${arrow}`
-  const name = `${value} ${truncate(station.name)}`
-  const mapLabel = composeLabel(value, station.name, mapLabelMode)
+  const name = composeLabel(value, station.name, mapLabelMode)
 
   const [src, sid] = station.id.split('/')
   // Cache-buster keyed to the half hour: the browser may cache the graph
@@ -134,6 +140,10 @@ function buildTideNote(
     )
     .join('')
   const description =
+    // The heading carries the station name in full: the note name is the
+    // chart label, which the user can shorten to the reading alone or turn
+    // off entirely, and it doubles as the popup title.
+    `<b>${esc(station.name)}</b>` +
     `<img src="${assetBase}/graph/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}.svg?units=${units}&v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td>${state.state === 'rising' ? 'Rising ▲' : state.state === 'falling' ? 'Falling ▼' : '—'}</td>` +
@@ -154,8 +164,6 @@ function buildTideNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
-        // what the patched notes layer draws beside the icon ('' hides it)
-        mapLabel,
         station: 'tide',
         stationId: station.id,
         state: state.state,
@@ -186,8 +194,7 @@ function buildCurrentNote(
       ? 'current-slack'
       : currentIcon(state.dir, state.speed, currentIconStyle)
   const value = slack ? 'slack' : `${state.speed.toFixed(1)}kn`
-  const label = `${value} ${truncate(station.name)}`
-  const mapLabel = composeLabel(value, station.name, mapLabelMode)
+  const label = composeLabel(value, station.name, mapLabelMode)
 
   const bucket = Math.floor(Date.now() / (30 * 60 * 1000))
   const rows = (state.next || [])
@@ -213,6 +220,7 @@ function buildCurrentNote(
     : `${state.phase === 'flood' ? 'Flooding' : 'Ebbing'} ${state.speed.toFixed(1)} kn` +
       (state.dir != null ? ` → ${Math.round(state.dir)}°T` : '')
   const description =
+    `<b>${esc(station.name)}</b>` +
     `<img src="${assetBase}/graph/current/${encodeURIComponent(station.id)}.svg?v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td colspan="2">${phaseTxt}</td></tr>` +
@@ -232,8 +240,6 @@ function buildCurrentNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
-        // what the patched notes layer draws beside the icon ('' hides it)
-        mapLabel,
         station: 'current',
         stationId: station.id,
         state: state.phase
