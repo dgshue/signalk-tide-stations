@@ -43,6 +43,9 @@ const {
   TIDE_STYLES,
   CURRENT_STYLES,
   ICON_SIZES,
+  LABEL_SIZES,
+  LABEL_POSITIONS,
+  labelStyle,
   tideStyleOf,
   currentStyleOf,
   iconSizeOf,
@@ -152,6 +155,29 @@ module.exports = function (app) {
             'panel, so hiding the label here loses nothing.',
           default: 'value-name'
         },
+        labelSize: {
+          type: 'string',
+          title: 'Label text size',
+          enum: Object.keys(LABEL_SIZES),
+          enumNames: ['Small', 'Medium', 'Large', 'Extra large'],
+          description:
+            'Size of the reading drawn beside the marker. Freeboard draws ' +
+            'note labels itself at ~10px, which is unreadable underway, so ' +
+            'the plugin publishes the size it wants with each marker. ' +
+            'Requires a Freeboard build that honours it (see the README); ' +
+            'on a stock build the label falls back to the default size.',
+          default: 'large'
+        },
+        labelPosition: {
+          type: 'string',
+          title: 'Label position',
+          enum: Object.keys(LABEL_POSITIONS),
+          enumNames: ['Above the marker', 'Below the marker', 'To the right'],
+          description:
+            'Where the label sits relative to the icon. "To the right" keeps ' +
+            'it clear of depth soundings printed above the marker.',
+          default: 'above'
+        },
         radiusNm: {
           type: 'number',
           title: 'Station search radius (nautical miles)',
@@ -194,6 +220,8 @@ module.exports = function (app) {
           tideIconStyle: 'gauge',
           currentIconStyle: 'scaled',
           iconSize: 'normal',
+          labelSize: 'large',
+          labelPosition: 'above',
           mapLabel: 'value-name'
         },
         options || {}
@@ -203,6 +231,12 @@ module.exports = function (app) {
       config.tideIconStyle = tideStyleOf(config.tideIconStyle)
       config.currentIconStyle = currentStyleOf(config.currentIconStyle)
       config.iconSize = iconSizeOf(config.iconSize)
+      if (!Object.hasOwn(LABEL_SIZES, config.labelSize || '')) {
+        config.labelSize = 'large'
+      }
+      if (!Object.hasOwn(LABEL_POSITIONS, config.labelPosition || '')) {
+        config.labelPosition = 'above'
+      }
       if (!MAP_LABEL_MODES.includes(config.mapLabel)) {
         config.mapLabel = 'value-name'
       }
@@ -321,7 +355,15 @@ module.exports = function (app) {
       pluginId: PLUGIN_ID,
       tideIconStyle: config.tideIconStyle,
       currentIconStyle: config.currentIconStyle,
-      mapLabel: config.mapLabel
+      mapLabel: config.mapLabel,
+      // Concrete label styling published with each note, so the size/position
+      // settings take effect on the next map refresh without regenerating
+      // anything (see labelStyle() for why offsets track the icon scale).
+      labelStyle: labelStyle(
+        config.labelSize,
+        config.labelPosition,
+        ICON_SIZES[config.iconSize] || 1
+      )
     }
   }
 

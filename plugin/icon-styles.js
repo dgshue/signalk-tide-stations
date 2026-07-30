@@ -169,6 +169,55 @@ const CURRENT_SIZE = { width: 34, height: 34, anchor: [17, 17], scale: 0.8 }
  */
 const ICON_SIZES = { small: 0.75, normal: 1.0, large: 1.3 }
 
+/**
+ * Label text sizes, in CSS px.
+ *
+ * Freeboard builds a note's label Text with no font, so it renders at the
+ * OpenLayers default (~10px) -- fine for a place name, unreadable for a live
+ * reading at a helm seat in daylight. The plugin therefore publishes the size
+ * it wants on each note (`properties.labelStyle`) and a Freeboard build that
+ * honours it applies it. `large` is the default because that is the smallest
+ * size that stayed legible in on-boat testing.
+ */
+const LABEL_SIZES = { small: 12, medium: 16, large: 20, xlarge: 26 }
+
+/**
+ * Where the label sits relative to the marker.
+ *
+ * Offsets are computed from the icon's half-height plus the text size, so a
+ * bigger label moves further out instead of creeping over the icon. `right`
+ * also switches the text to left-aligned, otherwise OpenLayers centres it on
+ * the offset point and it overlaps the marker again.
+ */
+const LABEL_POSITIONS = {
+  above: 'above',
+  below: 'below',
+  right: 'right'
+}
+
+/**
+ * Concrete label styling for a note, resolved from the two settings.
+ * @param size key of LABEL_SIZES
+ * @param position key of LABEL_POSITIONS
+ * @param iconScale the marker's effective scale, so offsets track icon size
+ */
+function labelStyle(size, position, iconScale = 1) {
+  const px = LABEL_SIZES[size] ?? LABEL_SIZES.large
+  const pos = Object.hasOwn(LABEL_POSITIONS, position || '') ? position : 'above'
+  // Half of a 30px marker, scaled, plus a small gap.
+  const clear = 15 * iconScale + 5
+  if (pos === 'right') {
+    return { px, offsetX: Math.round(clear), offsetY: 0, align: 'left' }
+  }
+  const dy = Math.round(clear + px * 0.55)
+  return {
+    px,
+    offsetX: 0,
+    offsetY: pos === 'below' ? dy : -dy,
+    align: 'center'
+  }
+}
+
 const pad = (i) => String(i).padStart(2, '0')
 
 /** Coerce a configured style name to a known one (defaults on garbage). */
@@ -296,6 +345,9 @@ module.exports = {
   CURRENT_SIZE,
   TIERS,
   ICON_SIZES,
+  LABEL_SIZES,
+  LABEL_POSITIONS,
+  labelStyle,
   pad,
   tideStyleOf,
   currentStyleOf,

@@ -119,7 +119,7 @@ function currentIcon(dirDeg, speedKn, style) {
 function buildTideNote(
   station,
   state,
-  { units, assetBase, pluginId, tideIconStyle, mapLabel: mapLabelMode }
+  { units, assetBase, pluginId, tideIconStyle, mapLabel: mapLabelMode, labelStyle }
 ) {
   const icon = tideIcon(state.state, state.norm, tideIconStyle)
   const arrow =
@@ -167,6 +167,10 @@ function buildTideNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
+        // How the host should draw this note's label. Freeboard renders note
+        // labels itself and defaults to ~10px, so a marker carrying a live
+        // reading has to ask for something legible.
+        labelStyle,
         station: 'tide',
         stationId: station.id,
         state: state.state,
@@ -186,7 +190,7 @@ function buildTideNote(
 function buildCurrentNote(
   station,
   state,
-  { units, assetBase, pluginId, currentIconStyle, mapLabel: mapLabelMode }
+  { units, assetBase, pluginId, currentIconStyle, mapLabel: mapLabelMode, labelStyle }
 ) {
   const slack = state.phase === 'slack'
   const dirKnown = state.dir != null
@@ -245,6 +249,7 @@ function buildCurrentNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
+        labelStyle,
         station: 'current',
         stationId: station.id,
         state: state.phase
