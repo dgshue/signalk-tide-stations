@@ -13,6 +13,13 @@
 // pointing at our server-rendered SVG endpoint instead).
 'use strict'
 
+const {
+  TIDE_LEVELS,
+  tideIconId,
+  currentIconId,
+  strengthTier
+} = require('./icon-styles')
+
 const M_TO_FT = 3.28084
 
 /** namespace for skIcon references, matching the symbols provider */
@@ -47,36 +54,24 @@ function currentNoteId(stationId) {
   return 'cur-' + stationId
 }
 
-// Gauge granularity: fill icons run tide-<state>-00 .. -20, i.e. 5% of the
-// low->high range per step (see tools/generate-symbols.js for why 21).
-const TIDE_LEVELS = 20
+// Icon selection lives in ./icon-styles.js so the plugin, the panel and the
+// SVG generator all agree on which ids exist. `tideIcon`/`currentIcon` here
+// are just the style-aware wrappers the note builders use.
 
 /**
- * Tide badge icon for a station state.
- * - state known + norm known  -> gauge badge at the nearest 5% fill step
- * - state known + norm null   -> arrow-only badge (never a fake fill level)
- * - state unknown             -> neutral grey badge
+ * Tide badge icon id for a station state, in the user's configured style.
+ * - state known + norm known  -> that style's level step nearest 5%
+ * - state known + norm null   -> that style's level-unknown form (grey "no
+ *   reading" mark, no level element -- never a fake full/empty gauge)
+ * - state unknown             -> that style's neutral grey form
  */
-function tideIcon(state, norm) {
-  if (state !== 'rising' && state !== 'falling') return 'tide-station'
-  if (norm == null || !Number.isFinite(norm)) return `tide-${state}`
-  const i = Math.round(Math.min(1, Math.max(0, norm)) * TIDE_LEVELS)
-  return `tide-${state}-${String(i).padStart(2, '0')}`
+function tideIcon(state, norm, style) {
+  return tideIconId(style, state, norm)
 }
 
-// Current strength tier breakpoints in knots -> symbol id letter.
-// OpenCPN draws current arrows continuously scaled ("the bigger the arrow,
-// the more current" -- OpenCPN manual, Tides & Currents); static symbols
-// force quantization, and the tiers/breakpoints are justified in
-// tools/generate-symbols.js next to the matching arrow geometry.
-function strengthTier(speedKn) {
-  return speedKn < 1.0 ? 'w' : speedKn < 2.0 ? 'm' : 's'
-}
-
-/** Pre-rotated, strength-tiered current arrow icon id. */
-function currentIcon(dirDeg, speedKn) {
-  const i = Math.round((((dirDeg % 360) + 360) % 360) / 22.5) % 16
-  return `current-${strengthTier(speedKn)}-${String(i).padStart(2, '0')}`
+/** Pre-rotated current arrow icon id in the user's configured style. */
+function currentIcon(dirDeg, speedKn, style) {
+  return currentIconId(style, dirDeg, speedKn)
 }
 
 /**
@@ -84,8 +79,12 @@ function currentIcon(dirDeg, speedKn) {
  * @param station stationMeta() shape (id like "noaa/8658901")
  * @param state { height, state: 'rising'|'falling'|null, next: [...] }
  */
-function buildTideNote(station, state, { units, assetBase, pluginId }) {
-  const icon = tideIcon(state.state, state.norm)
+function buildTideNote(
+  station,
+  state,
+  { units, assetBase, pluginId, tideIconStyle }
+) {
+  const icon = tideIcon(state.state, state.norm, tideIconStyle)
   const arrow =
     state.state === 'rising' ? '▲' : state.state === 'falling' ? '▼' : '·'
   const name = `${fmtHeight(state.height, units).replace(' ', '')}${arrow} ${truncate(station.name)}`
@@ -139,13 +138,19 @@ function buildTideNote(station, state, { units, assetBase, pluginId }) {
  * @param station { id, name, latitude, longitude, depth, bin }
  * @param state { speed, dir, phase, next } from Currents.stateAt()
  */
-function buildCurrentNote(station, state, { units, assetBase, pluginId }) {
+function buildCurrentNote(
+  station,
+  state,
+  { units, assetBase, pluginId, currentIconStyle }
+) {
   const slack = state.phase === 'slack'
   const dirKnown = state.dir != null
   // A running current with an unknown direction must never read as slack:
   // keep the speed in the label and fall back to the non-directional icon.
   const icon =
-    slack || !dirKnown ? 'current-slack' : currentIcon(state.dir, state.speed)
+    slack || !dirKnown
+      ? 'current-slack'
+      : currentIcon(state.dir, state.speed, currentIconStyle)
   const label = slack
     ? `slack ${truncate(station.name)}`
     : `${state.speed.toFixed(1)}kn ${truncate(station.name)}`

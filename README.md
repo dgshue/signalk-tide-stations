@@ -2,7 +2,7 @@
 
 Garmin-style **tide & current stations** on [Freeboard-SK](https://github.com/SignalK/freeboard-sk) charts, as a Signal K server plugin.
 
-- **Tide station gauges** on the chart: a light badge — white body, coloured outline — whose **fill level tracks the live water level** within the current cycle (near-empty at low water, near-full at high water; 21 pre-rendered 5% fill steps per state). **Blue + up-arrow while rising, red + down-arrow while falling** (the Garmin state colours). State is derived from the harmonic prediction curve: next extreme is a High → rising (same rule signalk-tides and OpenCPN use). When the level can't be normalised honestly (missing extremes, micro-tidal range) the badge falls back to arrow-only — never a fake fill.
+- **Tide station markers** on the chart whose **level indication tracks the live water level** within the current cycle (21 pre-rendered 5% steps per state). **Blue while rising, red while falling** (the Garmin state colours). State is derived from the harmonic prediction curve: next extreme is a High → rising (same rule signalk-tides and OpenCPN use). When the level can't be normalised honestly (missing extremes, micro-tidal range) the marker drops the level element and shows a grey "no reading" dash — never a fake full or empty gauge.
 - **Current station arrows** rotated to the predicted set (16 pre-rendered 22.5° sectors) and **weighted by speed**: thin pale arrow under 1 kn, standard OpenCPN-orange 1–2 kn, fat deep-orange at 2 kn and above (quantizing OpenCPN's "bigger arrow = more current" continuous scaling), with slack shown as a ring.
 - **Values at zoom**: the marker label ("2.9ft▲ Southport", "1.2kn Snows Cut") appears once the map zoom passes Freeboard's *labels* threshold — zoom in and the numbers appear, Garmin-style.
 - **Tap an icon** → Freeboard's note panel opens with a **forecast graph for right now** (server-rendered SVG), the next highs/lows (or max flood/ebb/slack events) and a NOAA link.
@@ -20,7 +20,31 @@ cd ~/.signalk
 npm install signalk-tide-stations   # or: npm install /path/to/checkout
 ```
 
-Enable the plugin in the Signal K admin UI (enabled by default), then **reload Freeboard-SK** (symbols are discovered at startup). Configuration: search radius (nm), height units (ft/m), show/hide currents, station count caps.
+Enable the plugin in the Signal K admin UI (enabled by default), then **reload Freeboard-SK** (symbols are discovered at startup). Configuration: **tide icon style**, **current icon style**, **marker size**, search radius (nm), height units (ft/m), show/hide currents, station count caps.
+
+## Icon styles
+
+Pick the tide marker style in Plugin Config. All styles keep blue = rising / red = falling, and all except `arrow` show the live water level.
+
+| `tideIconStyle` | Looks like |
+| --- | --- |
+| `gauge` *(default)* | Rounded badge, coloured outline, fill bar rising with the level. |
+| `staff` | Slim vertical tide staff with graduations; water fills from the bottom. Narrowest footprint. |
+| `ring` | Circular badge; an arc sweeps clockwise from 12 o'clock in proportion to the level. |
+| `pin` | Teardrop pin that fills to the level and whose tip points exactly at the station. |
+| `dial` | Clock face whose needle makes one clockwise turn per tide cycle — straight down at low water, straight up at high water. |
+| `arrow` | Solid coloured badge with only an up/down arrow. No level, least visual noise. |
+
+| `currentIconStyle` | Looks like |
+| --- | --- |
+| `scaled` *(default)* | Three arrow weights by speed (<1 kn / 1–2 kn / ≥2 kn). |
+| `uniform` | One arrow weight for every speed — direction only; speed stays in the label. |
+
+`iconSize` (`small` / `normal` / `large`) scales every marker.
+
+**Every style is pre-generated**, so switching styles needs no regeneration: change the dropdown and the new icons appear at the next chart notes refresh (pan/zoom). Freeboard discovers symbols only at startup, so the *first* Freeboard load after installing/upgrading the plugin has to happen before any style is selectable — and `iconSize`, which is baked into the symbol catalogue, always needs a Freeboard reload.
+
+To add a style, add it to `TIDE_STYLES` in `plugin/icon-styles.js` and a draw function in `tools/generate-symbols.js`, then run `node tools/generate-symbols.js` (it cross-checks the drawings against the catalogue and fails on a mismatch).
 
 ## Requirements
 

@@ -38,6 +38,15 @@ const {
   SYMBOL_NS,
   M_TO_FT
 } = require('./notes')
+const {
+  TIDE_STYLES,
+  CURRENT_STYLES,
+  ICON_SIZES,
+  tideStyleOf,
+  currentStyleOf,
+  iconSizeOf,
+  catalogue
+} = require('./icon-styles')
 const { tideSvg, currentSvg } = require('./graph')
 
 const PLUGIN_ID = 'signalk-tide-stations'
@@ -54,6 +63,21 @@ try {
   pkg = require('../package.json')
 } catch {
   pkg = { version: '0.0.0' }
+}
+
+/**
+ * "what each option looks like" text for an enum config field. The SK admin
+ * UI shows one description per property (not per enum value), so the only
+ * place to explain the choices is a single block of prose.
+ */
+function styleBlurb(defs, lead) {
+  return (
+    lead +
+    ' — ' +
+    Object.entries(defs)
+      .map(([k, v]) => `${k}: ${v.blurb}`)
+      .join(' ')
+  )
 }
 
 module.exports = function (app) {
@@ -74,6 +98,43 @@ module.exports = function (app) {
       title: 'Tide & Current Stations',
       type: 'object',
       properties: {
+        tideIconStyle: {
+          type: 'string',
+          title: 'Tide station icon style',
+          // The admin UI renders `enum` as a dropdown and (in the rjsf
+          // versions the SK server ships) uses `enumNames` for the labels;
+          // where it does not, the key names are still self-describing and
+          // the per-option blurbs are spelled out in the description.
+          enum: Object.keys(TIDE_STYLES),
+          enumNames: Object.values(TIDE_STYLES).map((s) => s.title),
+          description: styleBlurb(
+            TIDE_STYLES,
+            'All styles use blue while the tide is rising and red while it is falling.'
+          ),
+          default: 'gauge'
+        },
+        currentIconStyle: {
+          type: 'string',
+          title: 'Current station icon style',
+          enum: Object.keys(CURRENT_STYLES),
+          enumNames: Object.values(CURRENT_STYLES).map((s) => s.title),
+          description: styleBlurb(
+            CURRENT_STYLES,
+            'Arrows always point the way the current flows (the set).'
+          ),
+          default: 'scaled'
+        },
+        iconSize: {
+          type: 'string',
+          title: 'Marker size',
+          enum: Object.keys(ICON_SIZES),
+          enumNames: ['Small', 'Normal', 'Large'],
+          description:
+            'Overall size of the tide/current markers on the chart. ' +
+            'Unlike the style settings this one is baked into the symbol ' +
+            'catalogue, so it only takes effect after Freeboard is reloaded.',
+          default: 'normal'
+        },
         radiusNm: {
           type: 'number',
           title: 'Station search radius (nautical miles)',
@@ -112,10 +173,18 @@ module.exports = function (app) {
           units: 'ft',
           showCurrents: true,
           maxTideStations: 15,
-          maxCurrentStations: 15
+          maxCurrentStations: 15,
+          tideIconStyle: 'gauge',
+          currentIconStyle: 'scaled',
+          iconSize: 'normal'
         },
         options || {}
       )
+      // Coerce unknown/missing style names back to the defaults here, once,
+      // rather than in every call site.
+      config.tideIconStyle = tideStyleOf(config.tideIconStyle)
+      config.currentIconStyle = currentStyleOf(config.currentIconStyle)
+      config.iconSize = iconSizeOf(config.iconSize)
       running = true
       let tidesOk = true
       try {
@@ -225,7 +294,13 @@ module.exports = function (app) {
   // ------------------------------------------------------------------
 
   function noteOpts() {
-    return { units: config.units, assetBase: ASSET_BASE, pluginId: PLUGIN_ID }
+    return {
+      units: config.units,
+      assetBase: ASSET_BASE,
+      pluginId: PLUGIN_ID,
+      tideIconStyle: config.tideIconStyle,
+      currentIconStyle: config.currentIconStyle
+    }
   }
 
   /** Parse the server-parsed query into {pos, km} or null. */
@@ -366,40 +441,27 @@ module.exports = function (app) {
     return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`
   }
 
+  /**
+   * The FULL catalogue -- every style, not just the configured one.
+   *
+   * Freeboard discovers symbols once at startup and caches a built icon per
+   * id, so advertising only the selected style would make a style change
+   * publish ids Freeboard has never registered (markers would silently fall
+   * back to the generic note pin until a reload). Publishing everything is
+   * what makes switching styles take effect on the next notes refresh.
+   * See plugin/icon-styles.js.
+   */
   function symbolDefs() {
-    const defs = []
-    const add = (id, name, size, scale) =>
-      defs.push({
-        id,
-        name,
-        // anchor = icon centre: the station position is the point itself,
-        // not a pin tip.
-        anchor: [size / 2, size / 2],
-        scale
-      })
-    const pad = (i) => String(i).padStart(2, '0')
-    // arrow-only fallbacks (level unknown) + neutral badge
-    add('tide-rising', 'Tide rising', 30, 0.9)
-    add('tide-falling', 'Tide falling', 30, 0.9)
-    add('tide-station', 'Tide station', 30, 0.9)
-    // gauge badges: fill step NN = level at NN*5% of the low->high range
-    for (let i = 0; i <= 20; i++) {
-      add(`tide-rising-${pad(i)}`, `Tide rising, ${i * 5}% of range`, 30, 0.9)
-      add(`tide-falling-${pad(i)}`, `Tide falling, ${i * 5}% of range`, 30, 0.9)
-    }
-    add('current-slack', 'Current slack', 34, 0.8)
-    // 3 strength tiers x 16 direction sectors (see tools/generate-symbols.js)
-    const tierName = { w: 'weak', m: 'moderate', s: 'strong' }
-    for (const t of ['w', 'm', 's']) {
-      for (let i = 0; i < 16; i++) {
-        add(
-          `current-${t}-${pad(i)}`,
-          `Current ${tierName[t]} ${i * 22.5} deg`,
-          34,
-          0.8
-        )
-      }
-    }
+    const sizeMul = ICON_SIZES[config.iconSize] || 1
+    const defs = catalogue().map((d) => ({
+      id: d.id,
+      name: d.name,
+      // pixels within the icon's own viewBox; Freeboard passes these to
+      // OpenLayers with anchorXUnits/anchorYUnits = "pixels". Centred for
+      // the badge styles, at the tip for the pin.
+      anchor: d.anchor,
+      scale: Number((d.scale * sizeMul).toFixed(3))
+    }))
     const now = new Date().toISOString()
     const out = {}
     for (const d of defs) {
@@ -547,7 +609,10 @@ module.exports = function (app) {
         res.json({
           units: config.units,
           radiusNm: config.radiusNm,
-          showCurrents: config.showCurrents
+          showCurrents: config.showCurrents,
+          // the panel mirrors the chart marker selection in its station list
+          tideIconStyle: config.tideIconStyle,
+          currentIconStyle: config.currentIconStyle
         })
       })
     )
