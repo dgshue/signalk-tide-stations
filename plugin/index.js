@@ -35,6 +35,7 @@ const { Currents } = require('./currents')
 const {
   buildTideNote,
   buildCurrentNote,
+  MAP_LABEL_MODES,
   SYMBOL_NS,
   M_TO_FT
 } = require('./notes')
@@ -135,6 +136,22 @@ module.exports = function (app) {
             'catalogue, so it only takes effect after Freeboard is reloaded.',
           default: 'normal'
         },
+        mapLabel: {
+          type: 'string',
+          title: 'Text shown beside the marker',
+          enum: ['value-name', 'value', 'name', 'none'],
+          enumNames: [
+            'Reading and station name — "4.3ft▲ Bald Head"',
+            'Reading only — "4.3ft▲"',
+            'Station name only — "Bald Head"',
+            'Nothing — icon only'
+          ],
+          description:
+            'Controls only what is drawn on the chart. The full reading and ' +
+            'station name are always kept for the tap popup and the station ' +
+            'panel, so hiding the label here loses nothing.',
+          default: 'value-name'
+        },
         radiusNm: {
           type: 'number',
           title: 'Station search radius (nautical miles)',
@@ -176,7 +193,8 @@ module.exports = function (app) {
           maxCurrentStations: 15,
           tideIconStyle: 'gauge',
           currentIconStyle: 'scaled',
-          iconSize: 'normal'
+          iconSize: 'normal',
+          mapLabel: 'value-name'
         },
         options || {}
       )
@@ -185,6 +203,9 @@ module.exports = function (app) {
       config.tideIconStyle = tideStyleOf(config.tideIconStyle)
       config.currentIconStyle = currentStyleOf(config.currentIconStyle)
       config.iconSize = iconSizeOf(config.iconSize)
+      if (!MAP_LABEL_MODES.includes(config.mapLabel)) {
+        config.mapLabel = 'value-name'
+      }
       running = true
       let tidesOk = true
       try {
@@ -299,7 +320,8 @@ module.exports = function (app) {
       assetBase: ASSET_BASE,
       pluginId: PLUGIN_ID,
       tideIconStyle: config.tideIconStyle,
-      currentIconStyle: config.currentIconStyle
+      currentIconStyle: config.currentIconStyle,
+      mapLabel: config.mapLabel
     }
   }
 

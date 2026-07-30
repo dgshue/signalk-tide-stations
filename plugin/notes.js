@@ -46,6 +46,36 @@ function truncate(name, n = 18) {
   return name.length > n ? name.slice(0, n - 1) + '…' : name
 }
 
+/** valid `mapLabel` config values, in the order the config UI lists them */
+const MAP_LABEL_MODES = ['value-name', 'value', 'name', 'none']
+
+/**
+ * Text drawn on the chart next to the icon.
+ *
+ * The note `name` always carries the full "<value> <station>" string, because
+ * Freeboard uses it as the popup heading and the panel list keys off it. What
+ * gets *drawn* is published separately as properties.mapLabel and the patched
+ * notes layer reads that. Keeping the two apart means the user can strip the
+ * station name (or the label entirely) off a crowded chart without blanking
+ * the popup heading too.
+ *
+ * @param value formatted reading, e.g. "4.3ft▼" or "1.0kn" or "slack"
+ * @param stationName full station name (truncated here when it is used)
+ * @param mode 'value-name' | 'value' | 'name' | 'none'
+ */
+function composeLabel(value, stationName, mode) {
+  switch (mode) {
+    case 'value':
+      return value
+    case 'name':
+      return truncate(stationName)
+    case 'none':
+      return ''
+    default: // 'value-name'
+      return `${value} ${truncate(stationName)}`
+  }
+}
+
 /** note id for a tide station ("noaa/8658901" -> "tide-noaa-8658901") */
 function tideNoteId(stationId) {
   return 'tide-' + stationId.replace(/\//g, '-')
@@ -82,12 +112,14 @@ function currentIcon(dirDeg, speedKn, style) {
 function buildTideNote(
   station,
   state,
-  { units, assetBase, pluginId, tideIconStyle }
+  { units, assetBase, pluginId, tideIconStyle, mapLabel: mapLabelMode }
 ) {
   const icon = tideIcon(state.state, state.norm, tideIconStyle)
   const arrow =
     state.state === 'rising' ? '▲' : state.state === 'falling' ? '▼' : '·'
-  const name = `${fmtHeight(state.height, units).replace(' ', '')}${arrow} ${truncate(station.name)}`
+  const value = `${fmtHeight(state.height, units).replace(' ', '')}${arrow}`
+  const name = `${value} ${truncate(station.name)}`
+  const mapLabel = composeLabel(value, station.name, mapLabelMode)
 
   const [src, sid] = station.id.split('/')
   // Cache-buster keyed to the half hour: the browser may cache the graph
@@ -122,6 +154,8 @@ function buildTideNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
+        // what the patched notes layer draws beside the icon ('' hides it)
+        mapLabel,
         station: 'tide',
         stationId: station.id,
         state: state.state,
@@ -141,7 +175,7 @@ function buildTideNote(
 function buildCurrentNote(
   station,
   state,
-  { units, assetBase, pluginId, currentIconStyle }
+  { units, assetBase, pluginId, currentIconStyle, mapLabel: mapLabelMode }
 ) {
   const slack = state.phase === 'slack'
   const dirKnown = state.dir != null
@@ -151,9 +185,9 @@ function buildCurrentNote(
     slack || !dirKnown
       ? 'current-slack'
       : currentIcon(state.dir, state.speed, currentIconStyle)
-  const label = slack
-    ? `slack ${truncate(station.name)}`
-    : `${state.speed.toFixed(1)}kn ${truncate(station.name)}`
+  const value = slack ? 'slack' : `${state.speed.toFixed(1)}kn`
+  const label = `${value} ${truncate(station.name)}`
+  const mapLabel = composeLabel(value, station.name, mapLabelMode)
 
   const bucket = Math.floor(Date.now() / (30 * 60 * 1000))
   const rows = (state.next || [])
@@ -198,6 +232,8 @@ function buildCurrentNote(
         skIcon: `${SYMBOL_NS}:${icon}`,
         readOnly: true,
         plugin: pluginId,
+        // what the patched notes layer draws beside the icon ('' hides it)
+        mapLabel,
         station: 'current',
         stationId: station.id,
         state: state.phase
@@ -208,6 +244,7 @@ function buildCurrentNote(
 }
 
 module.exports = {
+  MAP_LABEL_MODES,
   buildTideNote,
   buildCurrentNote,
   tideNoteId,

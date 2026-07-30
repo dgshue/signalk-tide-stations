@@ -30,20 +30,35 @@ PUB = os.path.expanduser(
     "~/.signalk/node_modules/@signalk/freeboard-sk/public")
 
 NEEDLE = 'return i?new fe({image:i,text:new Lt({text:"",offsetX:0,offsetY:-12})})'
+# The drawn text comes from properties.mapLabel (the plugin's `mapLabel`
+# setting), falling back to the note name for notes published before that
+# property existed. `??` rather than `||` so an intentionally empty
+# mapLabel ("Nothing - icon only") stays empty instead of falling back.
 REPLACEMENT = (
+    'return i?new fe({image:i,text:new Lt({'
+    'text:t.properties?.plugin==="signalk-tide-stations"'
+    '?String(t.properties?.mapLabel??t.name??""):"",'
+    'offsetX:0,offsetY:-17,font:"bold 11px Roboto,sans-serif",'
+    'fill:new Be({color:"#263238"}),'
+    'stroke:new xe({color:"#ffffff",width:3})})})'
+)
+# Superseded patch bodies. Kept so an already-patched bundle is upgraded in
+# place instead of the script reporting "chunk not found".
+PRIOR = [
     'return i?new fe({image:i,text:new Lt({'
     'text:t.properties?.plugin==="signalk-tide-stations"&&t.name?String(t.name):"",'
     'offsetX:0,offsetY:-17,font:"bold 11px Roboto,sans-serif",'
     'fill:new Be({color:"#263238"}),'
     'stroke:new xe({color:"#ffffff",width:3})})})'
-)
+]
 
 
 def find_chunk():
     for path in glob.glob(os.path.join(PUB, "*.js")):
         with open(path, encoding="utf-8", errors="ignore") as f:
             body = f.read()
-        if NEEDLE in body or REPLACEMENT in body:
+        if (NEEDLE in body or REPLACEMENT in body
+                or any(p in body for p in PRIOR)):
             return path, body
     return None, None
 
@@ -67,9 +82,12 @@ def main():
         return
     if not os.path.exists(backup):
         shutil.copy2(path, backup)
+    # Pristine bundle -> patch it; already carrying a superseded patch ->
+    # upgrade that in place.
+    target = NEEDLE if NEEDLE in body else next(p for p in PRIOR if p in body)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(body.replace(NEEDLE, REPLACEMENT, 1))
-    print("patched", path)
+        f.write(body.replace(target, REPLACEMENT, 1))
+    print("patched" if target is NEEDLE else "upgraded", path)
 
 
 if __name__ == "__main__":
