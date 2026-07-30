@@ -140,10 +140,13 @@ function buildTideNote(
     )
     .join('')
   const description =
-    // The heading carries the station name in full: the note name is the
-    // chart label, which the user can shorten to the reading alone or turn
-    // off entirely, and it doubles as the popup title.
-    `<b>${esc(station.name)}</b>` +
+    // Only name the station here when the chart label does not already: the
+    // popup's title bar IS the note name, so repeating it costs a line, and
+    // the popup has a fixed height -- that line pushed the extremes table
+    // out of view entirely.
+    (mapLabelMode === 'value' || mapLabelMode === 'none'
+      ? `<b>${esc(station.name)}</b>`
+      : '') +
     `<img src="${assetBase}/graph/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}.svg?units=${units}&v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td>${state.state === 'rising' ? 'Rising ▲' : state.state === 'falling' ? 'Falling ▼' : '—'}</td>` +
@@ -220,7 +223,9 @@ function buildCurrentNote(
     : `${state.phase === 'flood' ? 'Flooding' : 'Ebbing'} ${state.speed.toFixed(1)} kn` +
       (state.dir != null ? ` → ${Math.round(state.dir)}°T` : '')
   const description =
-    `<b>${esc(station.name)}</b>` +
+    (mapLabelMode === 'value' || mapLabelMode === 'none'
+      ? `<b>${esc(station.name)}</b>`
+      : '') +
     `<img src="${assetBase}/graph/current/${encodeURIComponent(station.id)}.svg?v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td colspan="2">${phaseTxt}</td></tr>` +
