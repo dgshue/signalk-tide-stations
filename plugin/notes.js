@@ -47,10 +47,36 @@ function currentNoteId(stationId) {
   return 'cur-' + stationId
 }
 
-/** 16-sector index for a pre-rotated current arrow icon. */
-function sectorIcon(dirDeg) {
+// Gauge granularity: fill icons run tide-<state>-00 .. -20, i.e. 5% of the
+// low->high range per step (see tools/generate-symbols.js for why 21).
+const TIDE_LEVELS = 20
+
+/**
+ * Tide badge icon for a station state.
+ * - state known + norm known  -> gauge badge at the nearest 5% fill step
+ * - state known + norm null   -> arrow-only badge (never a fake fill level)
+ * - state unknown             -> neutral grey badge
+ */
+function tideIcon(state, norm) {
+  if (state !== 'rising' && state !== 'falling') return 'tide-station'
+  if (norm == null || !Number.isFinite(norm)) return `tide-${state}`
+  const i = Math.round(Math.min(1, Math.max(0, norm)) * TIDE_LEVELS)
+  return `tide-${state}-${String(i).padStart(2, '0')}`
+}
+
+// Current strength tier breakpoints in knots -> symbol id letter.
+// OpenCPN draws current arrows continuously scaled ("the bigger the arrow,
+// the more current" -- OpenCPN manual, Tides & Currents); static symbols
+// force quantization, and the tiers/breakpoints are justified in
+// tools/generate-symbols.js next to the matching arrow geometry.
+function strengthTier(speedKn) {
+  return speedKn < 1.0 ? 'w' : speedKn < 2.0 ? 'm' : 's'
+}
+
+/** Pre-rotated, strength-tiered current arrow icon id. */
+function currentIcon(dirDeg, speedKn) {
   const i = Math.round((((dirDeg % 360) + 360) % 360) / 22.5) % 16
-  return `current-${String(i).padStart(2, '0')}`
+  return `current-${strengthTier(speedKn)}-${String(i).padStart(2, '0')}`
 }
 
 /**
@@ -59,12 +85,7 @@ function sectorIcon(dirDeg) {
  * @param state { height, state: 'rising'|'falling'|null, next: [...] }
  */
 function buildTideNote(station, state, { units, assetBase, pluginId }) {
-  const icon =
-    state.state === 'rising'
-      ? 'tide-rising'
-      : state.state === 'falling'
-        ? 'tide-falling'
-        : 'tide-station'
+  const icon = tideIcon(state.state, state.norm)
   const arrow =
     state.state === 'rising' ? '▲' : state.state === 'falling' ? '▼' : '·'
   const name = `${fmtHeight(state.height, units).replace(' ', '')}${arrow} ${truncate(station.name)}`
@@ -104,7 +125,9 @@ function buildTideNote(station, state, { units, assetBase, pluginId }) {
         plugin: pluginId,
         station: 'tide',
         stationId: station.id,
-        state: state.state
+        state: state.state,
+        // normalised cycle position driving the gauge fill (debug/inspect)
+        level: state.norm == null ? null : Number(state.norm.toFixed(3))
       },
       $source: pluginId
     }
@@ -121,7 +144,8 @@ function buildCurrentNote(station, state, { units, assetBase, pluginId }) {
   const dirKnown = state.dir != null
   // A running current with an unknown direction must never read as slack:
   // keep the speed in the label and fall back to the non-directional icon.
-  const icon = slack || !dirKnown ? 'current-slack' : sectorIcon(state.dir)
+  const icon =
+    slack || !dirKnown ? 'current-slack' : currentIcon(state.dir, state.speed)
   const label = slack
     ? `slack ${truncate(station.name)}`
     : `${state.speed.toFixed(1)}kn ${truncate(station.name)}`
@@ -183,9 +207,12 @@ module.exports = {
   buildCurrentNote,
   tideNoteId,
   currentNoteId,
-  sectorIcon,
+  tideIcon,
+  currentIcon,
+  strengthTier,
   fmtHeight,
   fmtTime,
   SYMBOL_NS,
-  M_TO_FT
+  M_TO_FT,
+  TIDE_LEVELS
 }

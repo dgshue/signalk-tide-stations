@@ -377,13 +377,28 @@ module.exports = function (app) {
         anchor: [size / 2, size / 2],
         scale
       })
+    const pad = (i) => String(i).padStart(2, '0')
+    // arrow-only fallbacks (level unknown) + neutral badge
     add('tide-rising', 'Tide rising', 30, 0.9)
     add('tide-falling', 'Tide falling', 30, 0.9)
     add('tide-station', 'Tide station', 30, 0.9)
+    // gauge badges: fill step NN = level at NN*5% of the low->high range
+    for (let i = 0; i <= 20; i++) {
+      add(`tide-rising-${pad(i)}`, `Tide rising, ${i * 5}% of range`, 30, 0.9)
+      add(`tide-falling-${pad(i)}`, `Tide falling, ${i * 5}% of range`, 30, 0.9)
+    }
     add('current-slack', 'Current slack', 34, 0.8)
-    for (let i = 0; i < 16; i++) {
-      const n = String(i).padStart(2, '0')
-      add(`current-${n}`, `Current ${i * 22.5} deg`, 34, 0.8)
+    // 3 strength tiers x 16 direction sectors (see tools/generate-symbols.js)
+    const tierName = { w: 'weak', m: 'moderate', s: 'strong' }
+    for (const t of ['w', 'm', 's']) {
+      for (let i = 0; i < 16; i++) {
+        add(
+          `current-${t}-${pad(i)}`,
+          `Current ${tierName[t]} ${i * 22.5} deg`,
+          34,
+          0.8
+        )
+      }
     }
     const now = new Date().toISOString()
     const out = {}
@@ -561,6 +576,7 @@ module.exports = function (app) {
             timezone: station.timezone,
             state: state.state,
             heightM: state.height,
+            norm: state.norm,
             next: state.next
           })
         }

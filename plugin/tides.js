@@ -108,6 +108,13 @@ function extremesFor(stationId) {
   return extremes
 }
 
+// Minimum usable low->high range (meters) for normalising the gauge fill.
+// Below ~4 inches the surrounding extremes are either a degenerate pair from
+// the harmonic solver or a micro-tidal station where "percent of range" is
+// noise -- in both cases the gauge must fall back to "level unknown" rather
+// than show a confidently full/empty bar.
+const MIN_NORM_RANGE_M = 0.1
+
 /**
  * Tide state at `time` for a station.
  *
@@ -115,16 +122,33 @@ function extremesFor(stationId) {
  * "falling" when it is a Low -- the same rule signalk-tides publishes on
  * environment.tide.state and OpenCPN derives its tide-icon state from
  * (next-event direction on the predicted curve).
+ *
+ * `norm` is the height's position within the current half-cycle, 0 at the
+ * surrounding Low and 1 at the surrounding High (clamped: higher-frequency
+ * constituents can push the instantaneous level slightly past an extreme).
+ * It is null whenever it cannot be computed honestly: no bracketing extreme
+ * pair, a non-alternating pair, or a range under MIN_NORM_RANGE_M.
  */
 function stateAt(stationId, time = new Date()) {
   const extremes = extremesFor(stationId)
-  const next = extremes.find((e) => e.time >= time)
+  const idx = extremes.findIndex((e) => e.time >= time)
+  const next = idx >= 0 ? extremes[idx] : null
+  const prev = idx > 0 ? extremes[idx - 1] : null
   const p = predictor(stationId)
   const height = p.getWaterLevelAtTime({ time }).level
-  const upcoming = extremes.filter((e) => e.time >= time)
+  let norm = null
+  if (next && prev && next.high !== prev.high) {
+    const lo = next.high ? prev.level : next.level
+    const hi = next.high ? next.level : prev.level
+    if (hi - lo >= MIN_NORM_RANGE_M) {
+      norm = Math.min(1, Math.max(0, (height - lo) / (hi - lo)))
+    }
+  }
+  const upcoming = idx >= 0 ? extremes.slice(idx) : []
   return {
     height, // meters above chart datum
     state: next ? (next.high ? 'rising' : 'falling') : null,
+    norm, // 0 (at Low) .. 1 (at High), or null when unknown
     next: upcoming.slice(0, 4).map((e) => ({
       time: e.time,
       level: e.level,

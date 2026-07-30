@@ -180,16 +180,18 @@ async function refreshList() {
 }
 
 function iconFor(s) {
+  // Mirrors plugin/notes.js tideIcon()/currentIcon() so the list icon is
+  // exactly the marker shown on the chart (gauge fill + strength tier).
   if (s.kind === 'tide') {
-    return s.state === 'rising'
-      ? 'tide-rising'
-      : s.state === 'falling'
-        ? 'tide-falling'
-        : 'tide-station'
+    if (s.state !== 'rising' && s.state !== 'falling') return 'tide-station'
+    if (s.norm == null || !Number.isFinite(s.norm)) return `tide-${s.state}`
+    const lvl = Math.round(Math.min(1, Math.max(0, s.norm)) * 20)
+    return `tide-${s.state}-${String(lvl).padStart(2, '0')}`
   }
   if (s.phase === 'slack' || s.dir == null) return 'current-slack'
+  const tier = s.speedKn < 1.0 ? 'w' : s.speedKn < 2.0 ? 'm' : 's'
   const i = Math.round((((s.dir % 360) + 360) % 360) / 22.5) % 16
-  return `current-${String(i).padStart(2, '0')}`
+  return `current-${tier}-${String(i).padStart(2, '0')}`
 }
 
 function valueFor(s) {
