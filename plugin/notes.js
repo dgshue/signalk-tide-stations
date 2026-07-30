@@ -82,7 +82,7 @@ function buildTideNote(station, state, { units, assetBase, pluginId }) {
     )
     .join('')
   const description =
-    `<img src="${assetBase}/graph/tide/${src}/${sid}.svg?units=${units}&v=${bucket}" width="100%">` +
+    `<img src="${assetBase}/graph/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}.svg?units=${units}&v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td>${state.state === 'rising' ? 'Rising ▲' : state.state === 'falling' ? 'Falling ▼' : '—'}</td>` +
     `<td align="right">${fmtHeight(state.height, units)}</td></tr>` +

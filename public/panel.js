@@ -51,6 +51,15 @@ function fmtDay(d) {
 function nmi(km) {
   return (km / 1.852).toFixed(1)
 }
+/** Escape external text (station names) before innerHTML interpolation. */
+function esc(s) {
+  return String(s).replace(/[<>&"]/g, (c) => ({
+    '<': '&lt;',
+    '>': '&gt;',
+    '&': '&amp;',
+    '"': '&quot;'
+  })[c])
+}
 function stationKey(s) {
   return `${s.kind}:${s.id}`
 }
@@ -212,7 +221,7 @@ function renderList() {
     row.className = 'row'
     row.innerHTML =
       `<img class="sym" src="${BASE}/symbols/${iconFor(s)}.svg" alt="">` +
-      `<div class="info"><div class="name">${s.name}</div>` +
+      `<div class="info"><div class="name">${esc(s.name)}</div>` +
       `<div class="sub">${s.kind === 'tide' ? 'Tide' : 'Current'} · ${nmi(s.distanceKm || 0)} nm</div></div>` +
       `<div class="val ${v.cls}">${v.text}</div>` +
       `<div class="star ${fav ? 'on' : ''}">${fav ? '★' : '☆'}</div>`
