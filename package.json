@@ -1,0 +1,25 @@
+{
+  "name": "signalk-tide-stations",
+  "version": "0.1.0",
+  "description": "Garmin-style tide & current stations on Freeboard-SK charts: blue/red rising-falling icons, current-direction arrows, zoom-level value labels, tap-for-forecast panel with swipeable timeline, details table and favorites.",
+  "main": "plugin/index.js",
+  "keywords": [
+    "signalk-node-server-plugin",
+    "signalk-category-chart-plotters"
+  ],
+  "author": "dgshue",
+  "license": "MIT",
+  "signalk-plugin-enabled-by-default": true,
+  "signalk": {
+    "recommends": [
+      "signalk-tides"
+    ]
+  },
+  "dependencies": {
+    "neaps": "^0.7.0",
+    "signalk-plotterext-bus": "^0.10.0"
+  },
+  "scripts": {
+    "build:symbols": "node tools/generate-symbols.js"
+  }
+}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tides &amp; Currents</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<div id="app">
+  <div id="list-view">
+    <div class="hdr">
+      <span class="title">Tides &amp; Currents</span>
+      <button id="layer-btn" class="iconbtn" title="Show/hide station icons on the chart">👁</button>
+      <button id="refresh-btn" class="iconbtn" title="Refresh">⟳</button>
+    </div>
+    <div id="status" class="status">Loading…</div>
+    <div id="station-list"></div>
+  </div>
+
+  <div id="detail-view" hidden>
+    <div class="hdr">
+      <button id="back-btn" class="iconbtn" title="Back">‹</button>
+      <span class="title" id="detail-name"></span>
+      <button id="fav-btn" class="iconbtn star" title="Favorite">☆</button>
+    </div>
+    <div id="detail-state" class="statebadge"></div>
+    <div id="day-nav" class="daynav">
+      <button id="day-prev" class="iconbtn">‹</button>
+      <span id="day-label"></span>
+      <button id="day-next" class="iconbtn">›</button>
+    </div>
+    <div id="graph-wrap">
+      <svg id="graph" viewBox="0 0 360 170" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <input id="scrub" type="range" min="0" max="143" value="0">
+    <div id="scrub-readout" class="readout"></div>
+    <div class="btnrow">
+      <button id="details-btn" class="btn">Details</button>
+      <button id="goto-btn" class="btn">Show on chart</button>
+    </div>
+    <div id="details-table" hidden></div>
+  </div>
+</div>
+<script type="module" src="panel.js"></script>
+</body>
+</html>

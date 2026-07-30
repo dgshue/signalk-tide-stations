@@ -1,0 +1,653 @@
+// signalk-tide-stations -- Garmin-style tide & current stations for
+// Freeboard-SK charts.
+//
+// What it does, end to end:
+//
+//   1. `symbols` resource provider  -> custom chart icons (blue up-arrow =
+//      rising tide, red down-arrow = falling, 16 pre-rotated orange arrows
+//      for current set). Freeboard-SK loads these at startup and uses them
+//      wherever a note's properties.skIcon references them.
+//   2. `notes` resource provider    -> one note per tide/current station
+//      near the queried chart position, recomputed per request so the icon
+//      (rising/falling), the label value ("2.9ft^ Southport") and the popup
+//      forecast are live. Freeboard fetches notes around the map centre on
+//      pan/zoom and shows the note NAME as a marker label once zoom passes
+//      the user's "labels" threshold -- that gives the Garmin behaviour of
+//      values appearing as you zoom in.
+//   3. `plotterExtensions` provider -> a toolbar button + side panel inside
+//      Freeboard with the interactive forecast: graph for the device's
+//      current date/time, a swipeable/scrubbable time bar, a Details table
+//      and star-favourites (persisted via the host's extension state).
+//   4. HTTP endpoints under /plotterext/signalk-tide-stations/ -- panel
+//      assets, symbol SVGs, JSON station/forecast APIs and server-rendered
+//      SVG forecast graphs for the note popups.
+//
+// Tide predictions are computed OFFLINE from harmonic constituents via
+// `neaps` (the engine behind signalk-tides). Current predictions come from
+// the NOAA CO-OPS API with a disk cache (they have no offline dataset).
+'use strict'
+
+const path = require('path')
+const crypto = require('crypto')
+
+const tides = require('./tides')
+const { Currents } = require('./currents')
+const {
+  buildTideNote,
+  buildCurrentNote,
+  SYMBOL_NS,
+  M_TO_FT
+} = require('./notes')
+const { tideSvg, currentSvg } = require('./graph')
+
+const PLUGIN_ID = 'signalk-tide-stations'
+// Same namespaced, non-admin-gated base the reference extension
+// (signalk-poi-search) uses: /plugins/* is admin-gated, and the
+// signalk-webapp keyword would list us in the webapp launcher.
+const ASSET_BASE = `/plotterext/${PLUGIN_ID}`
+const PUBLIC_DIR = path.join(__dirname, '..', 'public')
+
+const NM_TO_KM = 1.852
+
+let pkg
+try {
+  pkg = require('../package.json')
+} catch {
+  pkg = { version: '0.0.0' }
+}
+
+module.exports = function (app) {
+  let config = {}
+  let currents = null
+  let running = false
+  let routesMounted = false
+
+  const debug = (msg) => app.debug(msg)
+
+  const plugin = {
+    id: PLUGIN_ID,
+    name: 'Tide & Current Stations',
+    description:
+      'Garmin-style tide & current station icons on Freeboard-SK charts with forecast panel and favorites.',
+
+    schema: () => ({
+      title: 'Tide & Current Stations',
+      type: 'object',
+      properties: {
+        radiusNm: {
+          type: 'number',
+          title: 'Station search radius (nautical miles)',
+          description:
+            'Stations further than this from the chart position are not shown.',
+          default: 30
+        },
+        units: {
+          type: 'string',
+          title: 'Height units',
+          enum: ['ft', 'm'],
+          default: 'ft'
+        },
+        showCurrents: {
+          type: 'boolean',
+          title: 'Show current stations (NOAA CO-OPS, requires internet)',
+          default: true
+        },
+        maxTideStations: {
+          type: 'number',
+          title: 'Maximum tide stations shown',
+          default: 15
+        },
+        maxCurrentStations: {
+          type: 'number',
+          title: 'Maximum current stations shown',
+          default: 15
+        }
+      }
+    }),
+
+    start(options) {
+      config = Object.assign(
+        {
+          radiusNm: 30,
+          units: 'ft',
+          showCurrents: true,
+          maxTideStations: 15,
+          maxCurrentStations: 15
+        },
+        options || {}
+      )
+      running = true
+      currents = new Currents({
+        dataDir: app.getDataDirPath(),
+        debug,
+        error: (m) => app.error(m)
+      })
+      mountRoutes()
+      registerNotesProvider()
+      registerSymbolsProvider()
+      registerExtensionProvider()
+      if (config.showCurrents) {
+        // Warm the NOAA catalogue in the background so the first chart
+        // query can already resolve nearby current stations.
+        currents.ensureMeta()
+      }
+      app.setPluginStatus('Started')
+    },
+
+    stop() {
+      running = false
+      // Resource providers are unregistered by the server on plugin stop;
+      // the mounted HTTP routes stay (Express cannot unmount) but answer
+      // 503 via the `running` guard.
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // shared station queries
+  // ------------------------------------------------------------------
+
+  const radiusKm = () => (Number(config.radiusNm) || 30) * NM_TO_KM
+
+  /** Tide station summaries near pos (uses live neaps predictions). */
+  function tideSummaries(pos, maxKm) {
+    const out = []
+    for (const s of tides.stationsNearPos(
+      pos,
+      maxKm,
+      Number(config.maxTideStations) || 15
+    )) {
+      try {
+        const state = tides.stateAt(s.id)
+        out.push({ station: tides.stationMeta(s), state })
+      } catch (err) {
+        debug(`tide state failed for ${s.id}: ${err.message}`)
+      }
+    }
+    return out
+  }
+
+  /**
+   * Current station summaries near pos. Waits up to `budgetMs` for missing
+   * NOAA predictions so the first render after startup already has arrows;
+   * afterwards everything is served from cache.
+   */
+  async function currentSummaries(pos, maxKm, budgetMs = 4000) {
+    if (!config.showCurrents) return []
+    const stations = await currents.stationsNearPos(
+      pos,
+      maxKm,
+      Number(config.maxCurrentStations) || 15
+    )
+    const missing = stations.filter((s) => !currents.pred.has(s.id))
+    if (missing.length > 0) {
+      await Promise.race([
+        Promise.allSettled(missing.map((s) => currents.fetchPred(s.id))),
+        new Promise((r) => setTimeout(r, budgetMs))
+      ])
+    }
+    const out = []
+    for (const s of stations) {
+      const state = currents.stateAt(s.id)
+      if (state) out.push({ station: s, state })
+    }
+    return out
+  }
+
+  // ------------------------------------------------------------------
+  // notes resource provider (the chart markers)
+  // ------------------------------------------------------------------
+
+  function noteOpts() {
+    return { units: config.units, assetBase: ASSET_BASE, pluginId: PLUGIN_ID }
+  }
+
+  /** Parse the server-parsed query into {pos, km} or null. */
+  function queryArea(query) {
+    if (!query) return null
+    let pos = null
+    const p = query.position
+    if (Array.isArray(p) && p.length >= 2) {
+      const lon = Number(p[0])
+      const lat = Number(p[1])
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        pos = { latitude: lat, longitude: lon }
+      }
+    } else if (p && typeof p === 'object') {
+      const lat = Number(p.latitude)
+      const lon = Number(p.longitude)
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        pos = { latitude: lat, longitude: lon }
+      }
+    }
+    if (!pos) return null
+    const distM = Number(query.distance)
+    const km = Number.isFinite(distM) && distM > 0
+      ? Math.min(distM / 1000, radiusKm())
+      : radiusKm()
+    return { pos, km }
+  }
+
+  async function listNotes(query) {
+    if (!running) return {}
+    const area = queryArea(query)
+    if (!area) return {} // Freeboard probes without a viewport -> no-op
+    const notes = {}
+    for (const { station, state } of tideSummaries(area.pos, area.km)) {
+      const [id, note] = buildTideNote(station, state, noteOpts())
+      notes[id] = note
+    }
+    for (const { station, state } of await currentSummaries(
+      area.pos,
+      area.km
+    )) {
+      const [id, note] = buildCurrentNote(station, state, noteOpts())
+      notes[id] = note
+    }
+    app.setPluginStatus(
+      `${Object.keys(notes).length} stations in last chart query`
+    )
+    return notes
+  }
+
+  async function getNote(id, property) {
+    if (!running) throw new Error('plugin stopped')
+    let built = null
+    if (id.startsWith('tide-')) {
+      // "tide-noaa-8658901" -> "noaa/8658901"
+      const stationId = id.slice(5).replace('-', '/')
+      const p = tides.predictor(stationId) // throws when unknown
+      built = buildTideNote(
+        tides.stationMeta(p),
+        tides.stateAt(stationId),
+        noteOpts()
+      )
+    } else if (id.startsWith('cur-')) {
+      const stationId = id.slice(4)
+      await currents.ensureMeta()
+      const station = currents.stationById(stationId)
+      if (!station) throw new Error(`Unknown current station ${stationId}`)
+      if (!currents.pred.has(stationId)) {
+        await currents.fetchPred(stationId)
+      }
+      const state = currents.stateAt(stationId)
+      if (!state) throw new Error(`No predictions for ${stationId}`)
+      built = buildCurrentNote(station, state, noteOpts())
+    } else {
+      throw new Error(`Not a ${PLUGIN_ID} note: ${id}`)
+    }
+    const note = built[1]
+    if (property === undefined || property === '') {
+      return note
+    }
+    const value = property
+      .split('.')
+      .reduce(
+        (v, k) => (v !== null && typeof v === 'object' ? v[k] : undefined),
+        note
+      )
+    if (value === undefined) {
+      throw new Error(`Resource ${id} has no property ${property}`)
+    }
+    return { value, $source: PLUGIN_ID }
+  }
+
+  function registerNotesProvider() {
+    app.registerResourceProvider({
+      type: 'notes',
+      methods: {
+        listResources: (query) => listNotes(query),
+        getResource: (id, property) => getNote(id, property),
+        setResource: () =>
+          Promise.reject(new Error('Tide station notes are read-only')),
+        deleteResource: () =>
+          Promise.reject(new Error('Tide station notes are read-only'))
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  // symbols resource provider (the chart icons)
+  // ------------------------------------------------------------------
+
+  /** Deterministic UUID from the symbol id (stable across restarts). */
+  function symbolUuid(id) {
+    const h = crypto
+      .createHash('sha1')
+      .update(`${PLUGIN_ID}:${id}`)
+      .digest('hex')
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`
+  }
+
+  function symbolDefs() {
+    const defs = []
+    const add = (id, name, size, scale) =>
+      defs.push({
+        id,
+        name,
+        // anchor = icon centre: the station position is the point itself,
+        // not a pin tip.
+        anchor: [size / 2, size / 2],
+        scale
+      })
+    add('tide-rising', 'Tide rising', 30, 0.9)
+    add('tide-falling', 'Tide falling', 30, 0.9)
+    add('tide-station', 'Tide station', 30, 0.9)
+    add('current-slack', 'Current slack', 34, 0.8)
+    for (let i = 0; i < 16; i++) {
+      const n = String(i).padStart(2, '0')
+      add(`current-${n}`, `Current ${i * 22.5} deg`, 34, 0.8)
+    }
+    const now = new Date().toISOString()
+    const out = {}
+    for (const d of defs) {
+      const uuid = symbolUuid(d.id)
+      out[uuid] = {
+        uuid,
+        alias: [`${SYMBOL_NS}:${d.id}`],
+        name: d.name,
+        description: 'signalk-tide-stations chart marker',
+        mediaType: 'image/svg+xml',
+        url: `${ASSET_BASE}/symbols/${d.id}.svg`,
+        roles: ['map-marker'],
+        scale: d.scale,
+        anchor: d.anchor,
+        $source: PLUGIN_ID,
+        timestamp: now
+      }
+    }
+    return out
+  }
+
+  function registerSymbolsProvider() {
+    const symbols = symbolDefs()
+    const byAlias = {}
+    for (const s of Object.values(symbols)) {
+      byAlias[s.alias[0]] = s
+      byAlias[s.alias[0].split(':')[1]] = s
+    }
+    app.registerResourceProvider({
+      type: 'symbols',
+      methods: {
+        listResources: async () => (running ? symbols : {}),
+        getResource: async (id) => {
+          const s = symbols[id] || byAlias[id]
+          if (!s) throw new Error(`Unknown symbol ${id}`)
+          return s
+        },
+        setResource: () =>
+          Promise.reject(new Error('Tide station symbols are read-only')),
+        deleteResource: () =>
+          Promise.reject(new Error('Tide station symbols are read-only'))
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  // plotterExtensions provider (toolbar button + forecast panel)
+  // ------------------------------------------------------------------
+
+  function manifest() {
+    return {
+      name: 'Tide & Current Stations',
+      description:
+        'Tide/current station forecast panel: graph, swipeable timeline, details table, favorites.',
+      version: pkg.version,
+      apiVersion: '1',
+      requires: ['panels.iframe'],
+      optional: ['buttons', 'map', 'resources.filter', 'units'],
+      buttons: [
+        {
+          id: 'toggle-tide-panel',
+          title: 'Tides & Currents',
+          slot: 'mapToolbar',
+          icon: 'waves',
+          action: { type: 'togglePanel', panel: 'tide-stations-panel' }
+        }
+      ],
+      panels: [
+        {
+          id: 'tide-stations-panel',
+          title: 'Tides & Currents',
+          type: 'iframe',
+          url: `${ASSET_BASE}/panel.html`,
+          lifecycle: 'keepAlive'
+        }
+      ]
+    }
+  }
+
+  function registerExtensionProvider() {
+    app.registerResourceProvider({
+      type: 'plotterExtensions',
+      methods: {
+        listResources: async () =>
+          running ? { [PLUGIN_ID]: manifest() } : {},
+        getResource: async (id) => {
+          if (!running || id !== PLUGIN_ID) {
+            throw new Error(`No such plotterExtensions resource: ${id}`)
+          }
+          return manifest()
+        },
+        setResource: () => Promise.reject(new Error('read-only')),
+        deleteResource: () => Promise.reject(new Error('read-only'))
+      }
+    })
+  }
+
+  // ------------------------------------------------------------------
+  // HTTP routes: JSON APIs, SVG graphs, panel + symbol assets
+  // ------------------------------------------------------------------
+
+  function guard(handler) {
+    return async (req, res) => {
+      if (!running) {
+        res.status(503).json({ error: 'plugin stopped' })
+        return
+      }
+      try {
+        await handler(req, res)
+      } catch (err) {
+        debug(`route ${req.path} failed: ${err.message}`)
+        res.status(400).json({ error: err.message })
+      }
+    }
+  }
+
+  /** Parse ?start&end ISO params with a default around now. */
+  function windowParams(req, defBackH = 0, defFwdH = 24) {
+    const now = Date.now()
+    let start = req.query.start ? new Date(req.query.start) : null
+    let end = req.query.end ? new Date(req.query.end) : null
+    if (!start || isNaN(start)) start = new Date(now - defBackH * 3600 * 1000)
+    if (!end || isNaN(end)) end = new Date(start.getTime() + defFwdH * 3600 * 1000)
+    // clamp to 8 days so a bad client cannot ask for months of timeline
+    if (end - start > 8 * 24 * 3600 * 1000) {
+      end = new Date(start.getTime() + 8 * 24 * 3600 * 1000)
+    }
+    return { start, end }
+  }
+
+  function mountRoutes() {
+    if (routesMounted) return
+    if (typeof app.use !== 'function' || typeof app.get !== 'function') {
+      app.error('Server app is not an Express application; no HTTP routes')
+      return
+    }
+
+    // -- JSON: plugin config the panel needs
+    app.get(
+      `${ASSET_BASE}/api/config`,
+      guard(async (req, res) => {
+        res.json({
+          units: config.units,
+          radiusNm: config.radiusNm,
+          showCurrents: config.showCurrents
+        })
+      })
+    )
+
+    // -- JSON: merged station list near a position
+    app.get(
+      `${ASSET_BASE}/api/stations`,
+      guard(async (req, res) => {
+        const lat = Number(req.query.latitude)
+        const lon = Number(req.query.longitude)
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+          res.status(400).json({ error: 'latitude/longitude required' })
+          return
+        }
+        const pos = { latitude: lat, longitude: lon }
+        const km = radiusKm()
+        const list = []
+        for (const { station, state } of tideSummaries(pos, km)) {
+          list.push({
+            kind: 'tide',
+            id: station.id,
+            name: station.name,
+            latitude: station.latitude,
+            longitude: station.longitude,
+            distanceKm: station.distance,
+            timezone: station.timezone,
+            state: state.state,
+            heightM: state.height,
+            next: state.next
+          })
+        }
+        for (const { station, state } of await currentSummaries(pos, km)) {
+          list.push({
+            kind: 'current',
+            id: station.id,
+            name: station.name,
+            latitude: station.latitude,
+            longitude: station.longitude,
+            distanceKm: station.distance,
+            phase: state.phase,
+            speedKn: state.speed,
+            dir: state.dir
+          })
+        }
+        list.sort((a, b) => (a.distanceKm || 0) - (b.distanceKm || 0))
+        res.json({ position: pos, units: config.units, stations: list })
+      })
+    )
+
+    // -- JSON: tide forecast for one station over a window
+    app.get(
+      `${ASSET_BASE}/api/tide/:src/:sid`,
+      guard(async (req, res) => {
+        const stationId = `${req.params.src}/${req.params.sid}`
+        const { start, end } = windowParams(req)
+        const data = tides.timelineFor(stationId, start, end)
+        const state = tides.stateAt(stationId)
+        res.json({
+          ...data,
+          now: { time: new Date(), heightM: state.height, state: state.state },
+          units: config.units
+        })
+      })
+    )
+
+    // -- JSON: current forecast for one station over a window
+    app.get(
+      `${ASSET_BASE}/api/current/:id`,
+      guard(async (req, res) => {
+        const stationId = req.params.id
+        await currents.ensureMeta()
+        const station = currents.stationById(stationId)
+        if (!station) {
+          res.status(404).json({ error: `unknown station ${stationId}` })
+          return
+        }
+        if (!currents.pred.has(stationId)) {
+          await currents.fetchPred(stationId)
+        }
+        const { start, end } = windowParams(req)
+        const state = currents.stateAt(stationId)
+        res.json({
+          station,
+          series: currents.series(stationId, start, end),
+          events: (currents.events(stationId) || []).filter(
+            (e) => e.time >= start && e.time <= end && e.type
+          ),
+          now: state
+            ? { time: new Date(), ...state, next: undefined }
+            : null,
+          units: 'kn'
+        })
+      })
+    )
+
+    // -- SVG: tide curve for the note popup (device-local today window)
+    app.get(
+      `${ASSET_BASE}/graph/tide/:src/:sid.svg`,
+      guard(async (req, res) => {
+        const stationId = `${req.params.src}/${req.params.sid}`
+        // Window: -6h .. +18h around now -- shows the ongoing cycle plus
+        // the rest of the day, which is what Garmin's popup graph shows.
+        const now = new Date()
+        const start = new Date(now.getTime() - 6 * 3600 * 1000)
+        const end = new Date(now.getTime() + 18 * 3600 * 1000)
+        const data = tides.timelineFor(stationId, start, end)
+        const state = tides.stateAt(stationId)
+        const units = req.query.units === 'm' ? 'm' : 'ft'
+        res
+          .set('Content-Type', 'image/svg+xml')
+          .set('Cache-Control', 'public, max-age=300')
+          .send(
+            tideSvg({
+              timeline: data.timeline,
+              extremes: data.extremes,
+              units,
+              tz: data.station.timezone,
+              now,
+              state: state.state
+            })
+          )
+      })
+    )
+
+    // -- SVG: current curve for the note popup
+    app.get(
+      `${ASSET_BASE}/graph/current/:id.svg`,
+      guard(async (req, res) => {
+        const stationId = req.params.id
+        const now = new Date()
+        const start = new Date(now.getTime() - 6 * 3600 * 1000)
+        const end = new Date(now.getTime() + 18 * 3600 * 1000)
+        res
+          .set('Content-Type', 'image/svg+xml')
+          .set('Cache-Control', 'public, max-age=300')
+          .send(
+            currentSvg({
+              series: currents.series(stationId, start, end),
+              tz: null,
+              now
+            })
+          )
+      })
+    )
+
+    // -- static assets: bus client library + panel + symbols
+    let serveStatic = null
+    try {
+      serveStatic = require('express').static
+    } catch {
+      app.error('express not resolvable; static assets unavailable')
+    }
+    if (serveStatic) {
+      try {
+        const busDist = path.join(
+          path.dirname(require.resolve('signalk-plotterext-bus/package.json')),
+          'dist'
+        )
+        app.use(`${ASSET_BASE}/bus`, serveStatic(busDist))
+      } catch (err) {
+        app.error(`plotterext bus assets unavailable: ${err.message}`)
+      }
+      app.use(ASSET_BASE, serveStatic(PUBLIC_DIR))
+    }
+    routesMounted = true
+  }
+
+  return plugin
+}

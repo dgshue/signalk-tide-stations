@@ -1,0 +1,121 @@
+/* Tides & Currents panel — self-contained, touch-first.
+   Light by default (matches Freeboard's drawer), dark via media query. */
+:root {
+  --bg: #ffffff;
+  --fg: #212121;
+  --muted: #757575;
+  --line: #e0e0e0;
+  --accent: #0b69c7;
+  --rising: #0b69c7;
+  --falling: #d0342c;
+  --current: #e07b00;
+  --chip: #f2f4f7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1e;
+    --fg: #eeeeee;
+    --muted: #9e9e9e;
+    --line: #3a3a3a;
+    --chip: #2a2d31;
+  }
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.4 Roboto, "Segoe UI", sans-serif;
+  -webkit-user-select: none; user-select: none;
+}
+#app { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+#list-view, #detail-view {
+  display: flex; flex-direction: column; height: 100%; overflow: hidden;
+}
+.hdr {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.hdr .title {
+  flex: 1 1 auto; font-weight: 600; font-size: 15px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.iconbtn {
+  background: none; border: none; color: var(--fg);
+  font-size: 20px; line-height: 1; padding: 6px 8px; cursor: pointer;
+  border-radius: 6px; min-width: 36px; min-height: 36px;
+}
+.iconbtn:active { background: var(--chip); }
+.iconbtn.off { opacity: 0.35; }
+.iconbtn.star.on { color: #f5b301; }
+.status { padding: 6px 12px; color: var(--muted); font-size: 12px; flex: 0 0 auto; }
+
+#station-list { flex: 1 1 auto; overflow-y: auto; }
+.row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer;
+}
+.row:active { background: var(--chip); }
+.row img.sym { width: 28px; height: 28px; flex: 0 0 auto; }
+.row .info { flex: 1 1 auto; min-width: 0; }
+.row .name {
+  font-weight: 600; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .sub { color: var(--muted); font-size: 12px; }
+.row .val { text-align: right; flex: 0 0 auto; font-weight: 600; }
+.row .val.rising { color: var(--rising); }
+.row .val.falling { color: var(--falling); }
+.row .val.cur { color: var(--current); }
+.row .star {
+  flex: 0 0 auto; font-size: 20px; padding: 6px; cursor: pointer;
+  color: var(--muted);
+}
+.row .star.on { color: #f5b301; }
+
+.statebadge {
+  margin: 8px 12px 0; padding: 6px 10px; border-radius: 8px;
+  background: var(--chip); font-weight: 600; flex: 0 0 auto;
+}
+.statebadge.rising { color: var(--rising); }
+.statebadge.falling { color: var(--falling); }
+.statebadge.cur { color: var(--current); }
+
+.daynav {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 4px 0 0; flex: 0 0 auto;
+}
+.daynav span { min-width: 130px; text-align: center; font-weight: 600; }
+
+#graph-wrap { padding: 4px 8px 0; flex: 0 0 auto; touch-action: pan-y; }
+#graph { width: 100%; height: auto; display: block; }
+
+#scrub {
+  margin: 2px 12px 0; flex: 0 0 auto; width: calc(100% - 24px);
+  accent-color: var(--accent); height: 28px;
+}
+.readout {
+  text-align: center; font-size: 15px; font-weight: 600;
+  padding: 2px 0 6px; flex: 0 0 auto; min-height: 24px;
+}
+.btnrow {
+  display: flex; gap: 8px; padding: 0 12px 8px; flex: 0 0 auto;
+}
+.btn {
+  flex: 1 1 auto; padding: 9px 0; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--chip); color: var(--fg);
+  font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.btn:active { filter: brightness(0.9); }
+.btn.active { border-color: var(--accent); color: var(--accent); }
+
+#details-table { flex: 1 1 auto; overflow-y: auto; padding: 0 12px 12px; }
+#details-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+#details-table th {
+  text-align: left; color: var(--muted); font-weight: 600;
+  padding: 4px 6px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--bg);
+}
+#details-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+#details-table tr.now td { color: var(--accent); font-weight: 700; }
+.empty { padding: 20px; text-align: center; color: var(--muted); }

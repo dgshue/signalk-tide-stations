@@ -1,0 +1,296 @@
+// NOAA CO-OPS current-prediction stations: metadata catalogue + per-station
+// flood/ebb/slack event predictions, with disk caching so the chart keeps
+// working offline on data already fetched.
+//
+// Endpoints (no API key; see https://api.tidesandcurrents.noaa.gov/):
+// - metadata: /mdapi/prod/webapi/stations.json?type=currentpredictions
+// - events:   /api/prod/datagetter?product=currents_predictions&interval=30
+//   For subordinate ("S") stations NOAA returns tabulated events only
+//   (slack / max flood / max ebb), the same tables OpenCPN's tcmgr consumes.
+//
+// Speed-now algorithm: cosine interpolation between tabulated events --
+// v(t) = v0 + (v1-v0) * (1 - cos(pi * (t-t0)/(t1-t0))) / 2 -- the classic
+// xtide/OpenCPN rule for stations that only publish max/slack tables.
+// Positive velocity = flood (meanFloodDir), negative = ebb (meanEbbDir).
+'use strict'
+
+const fs = require('fs')
+const path = require('path')
+
+const MDAPI =
+  'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?type=currentpredictions&units=english'
+const DATAGETTER = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter'
+
+// Catalogue changes rarely; a week matches crows-nest's refresh horizon for
+// the same dataset.
+const META_TTL_MS = 7 * 24 * 3600 * 1000
+// Predictions are fetched for a [today-1 .. today+7] day window; refetch when
+// the window no longer reaches 2 days ahead (so one fetch serves ~5 days).
+const PRED_FWD_DAYS = 7
+const PRED_MIN_LEAD_MS = 2 * 24 * 3600 * 1000
+// Below this speed the station is shown as slack water. OpenCPN draws its
+// smallest current arrow around a tenth of a knot; under that an arrow
+// direction is noise.
+const SLACK_KNOTS = 0.1
+// Serialise NOAA fetches and back off failures so an offshore/offline boat
+// never hammers a dead link.
+const FETCH_FAIL_BACKOFF_MS = 15 * 60 * 1000
+
+class Currents {
+  /**
+   * @param {object} opts
+   * @param {string} opts.dataDir plugin data dir for disk cache
+   * @param {(msg:string)=>void} opts.debug
+   * @param {(msg:string)=>void} opts.error
+   */
+  constructor({ dataDir, debug, error }) {
+    this.dataDir = dataDir
+    this.debug = debug || (() => {})
+    this.error = error || (() => {})
+    this.meta = null // [{id,name,lat,lng,bin,depth,type}] deduped by id
+    this.metaAt = 0
+    this.pred = new Map() // stationId -> { fetchedAt, begin, end, events }
+    this.failedAt = new Map() // stationId -> last failure ms
+    this.inflight = new Map() // stationId -> Promise
+    fs.mkdirSync(dataDir, { recursive: true })
+    this.loadDisk()
+  }
+
+  // ---------- disk cache ----------
+
+  file(name) {
+    return path.join(this.dataDir, name)
+  }
+
+  loadDisk() {
+    try {
+      const m = JSON.parse(fs.readFileSync(this.file('currents-meta.json')))
+      this.meta = m.stations
+      this.metaAt = m.fetchedAt
+    } catch {
+      /* no cache yet */
+    }
+    try {
+      const p = JSON.parse(fs.readFileSync(this.file('currents-pred.json')))
+      for (const [id, v] of Object.entries(p)) {
+        v.events.forEach((e) => (e.time = new Date(e.time)))
+        this.pred.set(id, v)
+      }
+    } catch {
+      /* no cache yet */
+    }
+  }
+
+  saveMeta() {
+    fs.writeFileSync(
+      this.file('currents-meta.json'),
+      JSON.stringify({ fetchedAt: this.metaAt, stations: this.meta })
+    )
+  }
+
+  savePred() {
+    const out = {}
+    for (const [id, v] of this.pred.entries()) {
+      out[id] = v
+    }
+    fs.writeFileSync(this.file('currents-pred.json'), JSON.stringify(out))
+  }
+
+  // ---------- station catalogue ----------
+
+  /** Ensure the station catalogue is loaded (fetches when stale). */
+  async ensureMeta() {
+    if (this.meta && Date.now() - this.metaAt < META_TTL_MS) {
+      return this.meta
+    }
+    try {
+      this.debug('fetching NOAA current station catalogue')
+      const res = await fetch(MDAPI, { signal: AbortSignal.timeout(30000) })
+      if (!res.ok) throw new Error(`mdapi HTTP ${res.status}`)
+      const body = await res.json()
+      // The catalogue repeats a station once per depth bin; keep the
+      // shallowest bin (nearest the surface -- what a chartplotter shows).
+      // Type "W" (weak & variable) stations carry no usable direction.
+      const byId = new Map()
+      for (const s of body.stations || []) {
+        if (s.type === 'W') continue
+        const depth = Number(s.depth) || 0
+        const prev = byId.get(s.id)
+        if (!prev || depth < prev.depth) {
+          byId.set(s.id, {
+            id: s.id,
+            name: s.name,
+            latitude: s.lat,
+            longitude: s.lng,
+            bin: s.currbin,
+            depth,
+            type: s.type
+          })
+        }
+      }
+      this.meta = [...byId.values()]
+      this.metaAt = Date.now()
+      this.saveMeta()
+      this.debug(`current catalogue: ${this.meta.length} stations`)
+    } catch (err) {
+      // Keep whatever cache we have; currents just stay unavailable offline.
+      this.error(`NOAA current catalogue fetch failed: ${err.message}`)
+    }
+    return this.meta
+  }
+
+  /** Current stations within maxKm of pos, closest first. */
+  async stationsNearPos(pos, maxKm, max) {
+    const meta = await this.ensureMeta()
+    if (!meta) return []
+    const out = []
+    for (const s of meta) {
+      const d = haversineKm(pos.latitude, pos.longitude, s.latitude, s.longitude)
+      if (d <= maxKm) out.push({ ...s, distance: d })
+    }
+    out.sort((a, b) => a.distance - b.distance)
+    return out.slice(0, max)
+  }
+
+  stationById(id) {
+    return (this.meta || []).find((s) => s.id === id)
+  }
+
+  // ---------- predictions ----------
+
+  /**
+   * Prediction events for a station, from cache; kicks off a background
+   * fetch when missing/stale. Returns null when nothing cached yet.
+   */
+  events(stationId) {
+    const hit = this.pred.get(stationId)
+    const fresh =
+      hit && new Date(hit.end).getTime() - Date.now() > PRED_MIN_LEAD_MS
+    if (!fresh) {
+      this.fetchPred(stationId) // fire & forget; dedupes/backoffs internally
+    }
+    return hit ? hit.events : null
+  }
+
+  /** Await the prediction fetch (used by API/list paths with a timeout). */
+  fetchPred(stationId) {
+    if (this.inflight.has(stationId)) {
+      return this.inflight.get(stationId)
+    }
+    const failed = this.failedAt.get(stationId)
+    if (failed && Date.now() - failed < FETCH_FAIL_BACKOFF_MS) {
+      return Promise.resolve(null)
+    }
+    const station = this.stationById(stationId)
+    if (!station) return Promise.resolve(null)
+    const begin = dateStamp(new Date(Date.now() - 24 * 3600 * 1000))
+    const end = dateStamp(
+      new Date(Date.now() + PRED_FWD_DAYS * 24 * 3600 * 1000)
+    )
+    const url =
+      `${DATAGETTER}?station=${encodeURIComponent(stationId)}` +
+      `&product=currents_predictions&bin=${station.bin || 1}` +
+      `&interval=30&time_zone=gmt&units=english&format=json` +
+      `&begin_date=${begin}&end_date=${end}`
+    const p = (async () => {
+      try {
+        this.debug(`fetching current predictions for ${stationId}`)
+        const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
+        if (!res.ok) throw new Error(`datagetter HTTP ${res.status}`)
+        const body = await res.json()
+        const rows = body.current_predictions && body.current_predictions.cp
+        if (!Array.isArray(rows) || rows.length === 0) {
+          throw new Error('no prediction rows')
+        }
+        const events = rows.map((r) => ({
+          // NOAA returns "YYYY-MM-DD HH:mm" in the requested zone (gmt)
+          time: new Date(r.Time.replace(' ', 'T') + 'Z'),
+          v: Number(r.Velocity_Major) || 0, // knots, +flood / -ebb
+          type: r.Type, // slack | flood | ebb (absent on interval series)
+          floodDir: Number(r.meanFloodDir),
+          ebbDir: Number(r.meanEbbDir)
+        }))
+        const entry = { fetchedAt: Date.now(), begin, end, events }
+        this.pred.set(stationId, entry)
+        this.failedAt.delete(stationId)
+        this.savePred()
+        return events
+      } catch (err) {
+        this.failedAt.set(stationId, Date.now())
+        this.debug(`current predictions failed for ${stationId}: ${err.message}`)
+        return null
+      } finally {
+        this.inflight.delete(stationId)
+      }
+    })()
+    this.inflight.set(stationId, p)
+    return p
+  }
+
+  /**
+   * Interpolated state at `time`: { speed (kn, >=0), dir (degT), phase }.
+   * phase: 'flood' | 'ebb' | 'slack'. Returns null without cached data.
+   */
+  stateAt(stationId, time = new Date()) {
+    const events = this.events(stationId)
+    if (!events || events.length === 0) return null
+    const t = time.getTime()
+    let before = null
+    let after = null
+    for (const e of events) {
+      const et = e.time.getTime()
+      if (et <= t) before = e
+      else {
+        after = e
+        break
+      }
+    }
+    if (!before || !after) return null // outside the cached window
+    const f = (t - before.time.getTime()) /
+      (after.time.getTime() - before.time.getTime())
+    // Cosine ramp between tabulated event velocities (see file header).
+    const v = before.v + (after.v - before.v) * (1 - Math.cos(Math.PI * f)) / 2
+    const speed = Math.abs(v)
+    const phase = speed < SLACK_KNOTS ? 'slack' : v > 0 ? 'flood' : 'ebb'
+    const dir = v >= 0 ? before.floodDir : before.ebbDir
+    return {
+      speed,
+      dir: Number.isFinite(dir) ? dir : null,
+      phase,
+      next: events.filter((e) => e.time.getTime() > t).slice(0, 6)
+    }
+  }
+
+  /** 10-minute interpolated series over [start, end) for graphs. */
+  series(stationId, start, end) {
+    const out = []
+    for (let t = start.getTime(); t < end.getTime(); t += 10 * 60 * 1000) {
+      const s = this.stateAt(stationId, new Date(t))
+      if (!s) continue
+      out.push({
+        time: new Date(t),
+        // signed for the graph: +flood / -ebb
+        v: s.phase === 'ebb' ? -s.speed : s.speed
+      })
+    }
+    return out
+  }
+}
+
+function dateStamp(d) {
+  return d.toISOString().slice(0, 10).replace(/-/g, '')
+}
+
+/** Great-circle distance in km (haversine). */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371
+  const toRad = (x) => (x * Math.PI) / 180
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2
+  return 2 * R * Math.asin(Math.sqrt(a))
+}
+
+module.exports = { Currents, SLACK_KNOTS, haversineKm }
