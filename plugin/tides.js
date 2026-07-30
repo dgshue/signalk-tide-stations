@@ -7,7 +7,26 @@
 // NOAA stations). Unit conversion is the caller's concern.
 'use strict'
 
-const { findStation, stationsNear } = require('neaps')
+// `neaps` must be loaded through its ESM entry: its CJS build (via
+// @neaps/tide-database's kdbush interop) throws "default.from is not a
+// function" with kdbush 4.x. The plugin awaits init() in start().
+let neaps = null
+
+async function init() {
+  if (!neaps) {
+    neaps = await import('neaps')
+  }
+}
+
+function findStation(id) {
+  if (!neaps) throw new Error('tides not initialised')
+  return neaps.findStation(id)
+}
+
+function stationsNear(opts) {
+  if (!neaps) throw new Error('tides not initialised')
+  return neaps.stationsNear(opts)
+}
 
 // Extremes are computed for a -1 .. +8 day window so "yesterday's" high is
 // available for interpolation and the panel can page a week ahead (matches
@@ -121,6 +140,7 @@ function stationMeta(s) {
 }
 
 module.exports = {
+  init,
   predictor,
   stationsNearPos,
   extremesFor,

@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "neaps": "^0.7.0",
-    "signalk-plotterext-bus": "^0.10.0"
+    "signalk-plotterext-bus": "^0.10.0",
+    "serve-static": "^1.16.2"
   },
   "scripts": {
     "build:symbols": "node tools/generate-symbols.js"

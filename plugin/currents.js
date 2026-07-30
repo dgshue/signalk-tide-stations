@@ -32,9 +32,11 @@ const PRED_MIN_LEAD_MS = 2 * 24 * 3600 * 1000
 // smallest current arrow around a tenth of a knot; under that an arrow
 // direction is noise.
 const SLACK_KNOTS = 0.1
-// Serialise NOAA fetches and back off failures so an offshore/offline boat
-// never hammers a dead link.
-const FETCH_FAIL_BACKOFF_MS = 15 * 60 * 1000
+// Limit concurrent NOAA fetches (an unthrottled 15-station burst has been
+// observed to fail wholesale, presumably rate limiting) and back off
+// failures so an offshore/offline boat never hammers a dead link.
+const FETCH_CONCURRENCY = 4
+const FETCH_FAIL_BACKOFF_MS = 5 * 60 * 1000
 
 class Currents {
   /**
@@ -52,6 +54,8 @@ class Currents {
     this.pred = new Map() // stationId -> { fetchedAt, begin, end, events }
     this.failedAt = new Map() // stationId -> last failure ms
     this.inflight = new Map() // stationId -> Promise
+    this.active = 0 // running NOAA fetches (see FETCH_CONCURRENCY)
+    this.queue = [] // waiters for a fetch slot
     fs.mkdirSync(dataDir, { recursive: true })
     this.loadDisk()
   }
@@ -164,12 +168,68 @@ class Currents {
    */
   events(stationId) {
     const hit = this.pred.get(stationId)
-    const fresh =
-      hit && new Date(hit.end).getTime() - Date.now() > PRED_MIN_LEAD_MS
+    // hit.end is a NOAA YYYYMMDD stamp; parse it explicitly (Date() cannot).
+    const endMs = hit
+      ? Date.UTC(
+          Number(hit.end.slice(0, 4)),
+          Number(hit.end.slice(4, 6)) - 1,
+          Number(hit.end.slice(6, 8))
+        )
+      : 0
+    const fresh = hit && endMs - Date.now() > PRED_MIN_LEAD_MS
     if (!fresh) {
       this.fetchPred(stationId) // fire & forget; dedupes/backoffs internally
     }
     return hit ? hit.events : null
+  }
+
+  /**
+   * Tabulated slack / max-flood / max-ebb events. Subordinate stations get
+   * these straight from NOAA; harmonic stations return an interval series,
+   * so events are derived from it (zero crossings = slack, |v| local maxima
+   * = max flood/ebb -- the classic tide-table reduction).
+   */
+  eventsTable(stationId) {
+    const rows = this.events(stationId)
+    if (!rows || rows.length === 0) return []
+    if (rows.some((r) => r.type)) {
+      return rows.filter((r) => r.type)
+    }
+    const out = []
+    for (let i = 1; i < rows.length; i++) {
+      const a = rows[i - 1]
+      const b = rows[i]
+      // slack: velocity sign change between consecutive samples
+      if ((a.v <= 0) !== (b.v <= 0) && a.v !== b.v) {
+        const f = Math.abs(a.v) / (Math.abs(a.v) + Math.abs(b.v))
+        out.push({
+          time: new Date(
+            a.time.getTime() + f * (b.time.getTime() - a.time.getTime())
+          ),
+          v: 0,
+          type: 'slack',
+          floodDir: a.floodDir,
+          ebbDir: a.ebbDir
+        })
+      }
+      // max flood/ebb: |v| local maximum above the slack threshold
+      const c = rows[i + 1]
+      if (
+        c &&
+        Math.abs(b.v) >= Math.abs(a.v) &&
+        Math.abs(b.v) > Math.abs(c.v) &&
+        Math.abs(b.v) > SLACK_KNOTS
+      ) {
+        out.push({
+          time: b.time,
+          v: b.v,
+          type: b.v > 0 ? 'flood' : 'ebb',
+          floodDir: b.floodDir,
+          ebbDir: b.ebbDir
+        })
+      }
+    }
+    return out
   }
 
   /** Await the prediction fetch (used by API/list paths with a timeout). */
@@ -193,6 +253,7 @@ class Currents {
       `&interval=30&time_zone=gmt&units=english&format=json` +
       `&begin_date=${begin}&end_date=${end}`
     const p = (async () => {
+      await this.acquireSlot()
       try {
         this.debug(`fetching current predictions for ${stationId}`)
         const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
@@ -221,10 +282,25 @@ class Currents {
         return null
       } finally {
         this.inflight.delete(stationId)
+        this.releaseSlot()
       }
     })()
     this.inflight.set(stationId, p)
     return p
+  }
+
+  acquireSlot() {
+    if (this.active < FETCH_CONCURRENCY) {
+      this.active++
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => this.queue.push(resolve))
+  }
+
+  releaseSlot() {
+    const next = this.queue.shift()
+    if (next) next()
+    else this.active--
   }
 
   /**
@@ -257,7 +333,9 @@ class Currents {
       speed,
       dir: Number.isFinite(dir) ? dir : null,
       phase,
-      next: events.filter((e) => e.time.getTime() > t).slice(0, 6)
+      next: this.eventsTable(stationId)
+        .filter((e) => e.time.getTime() > t)
+        .slice(0, 6)
     }
   }
 

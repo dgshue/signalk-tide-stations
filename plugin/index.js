@@ -105,7 +105,7 @@ module.exports = function (app) {
       }
     }),
 
-    start(options) {
+    async start(options) {
       config = Object.assign(
         {
           radiusNm: 30,
@@ -117,6 +117,12 @@ module.exports = function (app) {
         options || {}
       )
       running = true
+      try {
+        await tides.init() // loads neaps through its ESM entry
+      } catch (err) {
+        app.setPluginError(`tide engine failed to load: ${err.message}`)
+        app.error(err.message)
+      }
       currents = new Currents({
         dataDir: app.getDataDirPath(),
         debug,
@@ -151,11 +157,18 @@ module.exports = function (app) {
   /** Tide station summaries near pos (uses live neaps predictions). */
   function tideSummaries(pos, maxKm) {
     const out = []
-    for (const s of tides.stationsNearPos(
-      pos,
-      maxKm,
-      Number(config.maxTideStations) || 15
-    )) {
+    let near = []
+    try {
+      near = tides.stationsNearPos(
+        pos,
+        maxKm,
+        Number(config.maxTideStations) || 15
+      )
+    } catch (err) {
+      debug(`tide station lookup failed: ${err.message}`)
+      return out
+    }
+    for (const s of near) {
       try {
         const state = tides.stateAt(s.id)
         out.push({ station: tides.stationMeta(s), state })
@@ -566,9 +579,9 @@ module.exports = function (app) {
         res.json({
           station,
           series: currents.series(stationId, start, end),
-          events: (currents.events(stationId) || []).filter(
-            (e) => e.time >= start && e.time <= end && e.type
-          ),
+          events: currents
+            .eventsTable(stationId)
+            .filter((e) => e.time >= start && e.time <= end),
           now: state
             ? { time: new Date(), ...state, next: undefined }
             : null,
@@ -628,17 +641,25 @@ module.exports = function (app) {
     )
 
     // -- static assets: bus client library + panel + symbols
+    // serve-static is a direct dependency: the plugin may be installed as a
+    // symlink (npm install <dir>), where require() resolves from the real
+    // path and the server's hoisted express is NOT reachable.
     let serveStatic = null
     try {
-      serveStatic = require('express').static
+      serveStatic = require('serve-static')
     } catch {
-      app.error('express not resolvable; static assets unavailable')
+      try {
+        serveStatic = require('express').static
+      } catch {
+        app.error('serve-static/express not resolvable; assets unavailable')
+      }
     }
     if (serveStatic) {
       try {
-        const busDist = path.join(
-          path.dirname(require.resolve('signalk-plotterext-bus/package.json')),
-          'dist'
+        // NB: the package's "exports" map does not expose package.json, so
+        // resolve via the extension entry (lands in dist/) instead.
+        const busDist = path.dirname(
+          require.resolve('signalk-plotterext-bus/extension')
         )
         app.use(`${ASSET_BASE}/bus`, serveStatic(busDist))
       } catch (err) {
