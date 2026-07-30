@@ -365,13 +365,17 @@ module.exports = function (app) {
       }
     }
     // The currents half must never take the offline tide markers down with
-    // it: cap its total time (a first offline catalogue attempt can hang on
-    // its network timeout) and swallow its failures per station.
+    // it, and must never make the chart wait: pass a zero budget so this
+    // returns whatever predictions are already cached. Stations it has not
+    // seen still start fetching here and land in the cache, so they appear on
+    // the next refresh -- which Freeboard issues on every map move anyway.
+    // Blocking instead cost ~4 s on entering new water, and the markers read
+    // as missing for that whole time.
     let curList = []
     try {
       let timer
       curList = await Promise.race([
-        currentSummaries(area.pos, area.km),
+        currentSummaries(area.pos, area.km, 0),
         new Promise((resolve) => {
           timer = setTimeout(() => resolve([]), 6000)
         })
