@@ -139,20 +139,22 @@ function buildTideNote(
         `<td align="right">${fmtHeight(e.level, units)}</td></tr>`
     )
     .join('')
+  // NUMBERS BEFORE THE CURVE. Freeboard's note popup is a fixed-height box
+  // with no scroll, and a width:100% graph eats most of it -- put the graph
+  // first and the extremes table falls below the fold, which is the half a
+  // skipper actually needs. If anything is clipped it should be the picture.
   const description =
     // Only name the station here when the chart label does not already: the
-    // popup's title bar IS the note name, so repeating it costs a line, and
-    // the popup has a fixed height -- that line pushed the extremes table
-    // out of view entirely.
+    // popup's title bar IS the note name, so repeating it costs a line.
     (mapLabelMode === 'value' || mapLabelMode === 'none'
       ? `<b>${esc(station.name)}</b>`
       : '') +
-    `<img src="${assetBase}/graph/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}.svg?units=${units}&v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td>${state.state === 'rising' ? 'Rising ▲' : state.state === 'falling' ? 'Falling ▼' : '—'}</td>` +
     `<td align="right">${fmtHeight(state.height, units)}</td></tr>` +
     rows +
     `</table>` +
+    `<img src="${assetBase}/graph/tide/${encodeURIComponent(src)}/${encodeURIComponent(sid)}.svg?units=${units}&v=${bucket}" width="100%">` +
     `<p><small>NOAA harmonic predictions (neaps) · heights above chart datum · not for navigation</small></p>`
 
   return [
@@ -230,11 +232,11 @@ function buildCurrentNote(
     (mapLabelMode === 'value' || mapLabelMode === 'none'
       ? `<b>${esc(station.name)}</b>`
       : '') +
-    `<img src="${assetBase}/graph/current/${encodeURIComponent(station.id)}.svg?v=${bucket}" width="100%">` +
     `<table width="100%">` +
     `<tr><td><b>Now</b></td><td colspan="2">${phaseTxt}</td></tr>` +
     rows +
     `</table>` +
+    `<img src="${assetBase}/graph/current/${encodeURIComponent(station.id)}.svg?v=${bucket}" width="100%">` +
     `<p><small>NOAA current predictions · surface bin (${station.depth ? station.depth + ' ft' : 'n/a'}) · not for navigation</small></p>`
 
   return [
